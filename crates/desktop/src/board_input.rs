@@ -157,12 +157,13 @@ impl Widget<Message, Theme, iced::Renderer> for BoardInput<'_> {
         match event {
             Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)) => {
                 if let (Some(square), Some(origin)) = (square, position) {
-                    let draggable = self
+                    let draggable = self.app.game.piece_at(square).is_some();
+                    state.preview_destinations = if self
                         .app
                         .game
                         .piece_at(square)
-                        .is_some_and(|p| p.color == self.app.game.turn());
-                    state.preview_destinations = if draggable {
+                        .is_some_and(|p| p.color == self.app.game.turn())
+                    {
                         self.app.game.destinations(square)
                     } else {
                         Vec::new()
@@ -207,7 +208,17 @@ impl Widget<Message, Theme, iced::Renderer> for BoardInput<'_> {
             }
             Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)) => {
                 if let Some(press) = state.press.take() {
-                    if press.dragging {
+                    let can_move = self
+                        .app
+                        .game
+                        .piece_at(press.square)
+                        .is_some_and(|p| p.color == self.app.game.turn());
+                    if press.draggable
+                        && !can_move
+                        && (press.dragging || square != Some(press.square))
+                    {
+                        // A visual drag of the other side never submits a move.
+                    } else if press.dragging {
                         shell.publish(Message::Dropped(
                             press.square,
                             square,
@@ -492,6 +503,42 @@ mod tests {
                 Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)),
                 point,
             )
+        }
+    }
+    #[test]
+    fn either_side_can_be_dragged_but_opponent_has_no_hints_or_release_action() {
+        for black_turn in [false, true] {
+            let mut app = App::default();
+            if black_turn {
+                app.game.play_uci("e2e4").unwrap();
+            }
+            app.selected = Some(if black_turn { Square::E7 } else { Square::E2 });
+            let initial = app.game.fen();
+            let committed_selection = app.selected;
+            let mut h = Harness::new(&app);
+            let origin = if black_turn {
+                Point::new(99.0, 375.0)
+            } else {
+                Point::new(249.0, 75.0)
+            };
+            let destination =
+                Point::new(origin.x, origin.y + if black_turn { -100.0 } else { 100.0 });
+            h.press(origin);
+            assert!(
+                h.event(
+                    Event::Mouse(mouse::Event::CursorMoved {
+                        position: destination
+                    }),
+                    destination
+                )
+                .is_empty()
+            );
+            let state = h.tree.state.downcast_ref::<State>();
+            assert!(state.press.is_some_and(|p| p.draggable && p.dragging));
+            assert!(state.preview_destinations.is_empty());
+            assert!(h.release(destination).is_empty());
+            assert_eq!(app.game.fen(), initial);
+            assert_eq!(app.selected, committed_selection);
         }
     }
     #[test]
@@ -781,6 +828,21 @@ mod tests {
         assert!(h.release(e2).is_empty());
         let e7 = Point::new(249.0, 75.0);
         h.press(e7);
+        assert!(
+            h.tree
+                .state
+                .downcast_ref::<State>()
+                .press
+                .unwrap()
+                .draggable
+        );
+        assert!(
+            h.tree
+                .state
+                .downcast_ref::<State>()
+                .preview_destinations
+                .is_empty()
+        );
         assert!(
             h.event(Event::Mouse(mouse::Event::CursorMoved { position: e2 }), e2)
                 .is_empty()

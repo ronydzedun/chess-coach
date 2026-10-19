@@ -4,6 +4,7 @@ pub mod appearance;
 mod appearance_ui;
 mod board_input;
 mod evaluation;
+mod game_analysis;
 pub mod import;
 mod review;
 mod settings_ui;
@@ -61,6 +62,8 @@ pub struct App {
     active: Option<(u64, u64)>,
     active_key: Option<analysis_cache::Key>,
     analysis_cache: analysis_cache::Cache,
+    game_analysis: Option<game_analysis::GameAnalysis>,
+    background: Option<game_analysis::Background>,
     analyzing: bool,
     auto_analysis: bool,
     analysis_due: Option<std::time::Instant>,
@@ -107,6 +110,8 @@ impl Default for App {
             active: None,
             active_key: None,
             analysis_cache: analysis_cache::Cache::default(),
+            game_analysis: None,
+            background: None,
             analyzing: false,
             auto_analysis: true,
             analysis_due: Some(std::time::Instant::now()),
@@ -191,7 +196,6 @@ impl App {
         ])
     }
     fn changed(&mut self) {
-        self.stop_analysis();
         self.info = engine::Info::default();
         self.best_move = None;
         self.selected = None;
@@ -201,10 +205,22 @@ impl App {
         self.schedule_analysis();
     }
     fn schedule_analysis(&mut self) {
-        self.stop_analysis();
+        self.analysis_due = None;
+        if !self.auto_analysis || self.active.is_some() {
+            self.stop_analysis();
+        }
+        if let Ok(key) = self.analysis_key()
+            && self
+                .game_analysis
+                .as_mut()
+                .is_some_and(|batch| batch.configure(&key))
+        {
+            self.stop_analysis();
+        }
         if self.restore_cached_analysis() {
             return;
         }
+        self.stop_analysis();
         if self.auto_analysis {
             self.analysis_due =
                 Some(std::time::Instant::now() + std::time::Duration::from_millis(300));
@@ -213,6 +229,7 @@ impl App {
     fn stop_analysis(&mut self) {
         self.analysis_due = None;
         self.engine.stop();
+        self.background = None;
         self.active = None;
         self.active_key = None;
         self.analyzing = false;
@@ -239,11 +256,12 @@ impl App {
         })
     }
     fn restore_cached_analysis(&mut self) -> bool {
-        let Some(result) = self
-            .analysis_key()
-            .ok()
-            .and_then(|key| self.analysis_cache.get(&key))
-        else {
+        let Some(result) = self.analysis_key().ok().and_then(|key| {
+            self.game_analysis
+                .as_ref()
+                .and_then(|batch| batch.get(&key))
+                .or_else(|| self.analysis_cache.get(&key))
+        }) else {
             return false;
         };
         self.info = result.info;
@@ -291,6 +309,14 @@ impl App {
             | engine::Event::Stopped { id }
             | engine::Event::Error { id, .. } => *id,
         };
+        if self
+            .background
+            .as_ref()
+            .is_some_and(|request| request.id == id)
+        {
+            self.receive_background(event);
+            return;
+        }
         if self.active != Some((id, self.game.revision())) {
             return;
         }
@@ -310,6 +336,15 @@ impl App {
             engine::Event::BestMove { best_move, .. } => {
                 self.best_move = best_move;
                 if let Some(key) = self.active_key.take() {
+                    if let Some(batch) = &mut self.game_analysis {
+                        batch.record(
+                            &key,
+                            Some(analysis_cache::Result {
+                                info: self.info.clone(),
+                                best_move: self.best_move.clone(),
+                            }),
+                        );
+                    }
                     self.analysis_cache.insert(
                         key,
                         analysis_cache::Result {
@@ -327,6 +362,11 @@ impl App {
                 self.active = None;
                 self.active_key = None;
                 self.analyzing = false;
+                if let Ok(key) = self.analysis_key()
+                    && let Some(batch) = &mut self.game_analysis
+                {
+                    batch.record(&key, None);
+                }
                 self.engine_status = "Search deadline exceeded · result not cached".into();
             }
             engine::Event::Stopped { .. } => {
@@ -339,6 +379,7 @@ impl App {
                 self.active = None;
                 self.active_key = None;
                 self.analyzing = false;
+                self.pause_game_analysis_error(message.clone());
                 self.engine_status = message;
             }
         }
@@ -381,6 +422,16 @@ impl App {
             Message::OpenSettings | Message::OpenImport | Message::Flip | Message::Cancel
         ) {
             self.pointer_epoch = self.pointer_epoch.wrapping_add(1);
+        }
+        if matches!(
+            &message,
+            Message::EnginePath(_)
+                | Message::SearchMode(_)
+                | Message::SearchLimit(_)
+                | Message::ToggleAnalysis
+                | Message::Analyze
+        ) {
+            self.resume_game_analysis();
         }
         match message {
             Message::OpenSettings
@@ -469,9 +520,11 @@ impl App {
                 self.promotion = None;
             }
             Message::New => {
+                self.stop_analysis();
                 self.engine.reset();
                 self.game.reset();
                 self.review.detach();
+                self.game_analysis = None;
                 self.changed();
             }
             Message::Undo => {
@@ -485,8 +538,10 @@ impl App {
             Message::FenChanged(value) => self.fen_input = value,
             Message::LoadFen => match self.game.load_fen(&self.fen_input) {
                 Ok(()) => {
+                    self.stop_analysis();
                     self.engine.reset();
                     self.review.detach();
+                    self.game_analysis = None;
                     self.changed();
                 }
                 Err(err) => self.notice = err,
@@ -541,6 +596,7 @@ impl App {
                 while let Some(event) = self.engine.try_recv() {
                     self.receive(event);
                 }
+                self.start_background_analysis();
             }
             Message::Key(keyboard::Event::KeyPressed { key, modifiers, .. }) => {
                 if self.settings.is_some() {

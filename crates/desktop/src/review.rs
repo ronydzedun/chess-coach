@@ -144,15 +144,21 @@ impl App {
         Task::none()
     }
     fn select_game(&mut self, index: usize) {
-        let Some(pgn) = self.review.games.get(index) else {
+        let games = Arc::clone(&self.review.games);
+        let Some(pgn) = games.get(index) else {
             self.notice = "Imported game is unavailable".into();
             return;
         };
+        self.stop_analysis();
         self.engine.reset();
         self.game.load_line(&pgn.game);
         self.review.selected = self.review.choices.get(index).cloned();
         self.review.modified = false;
+        self.begin_game_analysis();
         self.changed();
+        if self.auto_analysis && self.analysis_due.is_some() {
+            self.analysis_due = Some(std::time::Instant::now());
+        }
         self.notice = format!("Game {} · starting position", index + 1);
     }
     pub(super) fn review_controls(&self) -> Element<'_, Message> {
@@ -190,6 +196,13 @@ impl App {
                         .color(theme::SELECTED),
                 );
             }
+        }
+        if let Some(batch) = &self.game_analysis {
+            content = content.push(
+                text(batch.status(self.auto_analysis))
+                    .size(12)
+                    .color(theme::MUTED),
+            );
         }
         content
             .push(
@@ -259,6 +272,11 @@ mod tests {
         apply(&mut app, "1. e4 e5 2. Nf3 *");
         assert_eq!(app.game.ply(), 0);
         assert_eq!(app.game.line().len(), 3);
+        assert!(app.game_analysis.is_some());
+        assert!(
+            app.analysis_due
+                .is_some_and(|due| due <= std::time::Instant::now())
+        );
         send(&mut app, Message::Seek(3));
         assert_eq!(app.game.history().len(), 3);
         send(&mut app, Message::Undo);
@@ -319,6 +337,56 @@ mod tests {
         );
         assert_eq!(app.review.pending, Some(newer));
         assert_eq!(app.game.fen(), old);
+    }
+    #[test]
+    fn switching_games_cancels_background_and_ignores_its_late_result() {
+        let mut app = App {
+            engine_path: "/nonexistent/queue-switch".into(),
+            ..App::default()
+        };
+        apply(&mut app, "1. e4 *\n\n1. d4 *");
+        app.analysis_due = None;
+        app.next_request = 900;
+        app.active = Some((900, app.game.revision()));
+        app.active_key = Some(app.analysis_key().unwrap());
+        app.receive(engine::Event::Info {
+            id: 900,
+            info: engine::Info {
+                score: Some(engine::Score::Cp(25)),
+                ..Default::default()
+            },
+        });
+        app.receive(engine::Event::BestMove {
+            id: 900,
+            best_move: Some("e2e4".into()),
+        });
+        app.start_background_analysis();
+        let old = app.background.as_ref().unwrap().id;
+        let choice = app.review.choices[1].clone();
+        send(&mut app, Message::SelectGame(choice));
+        assert!(app.background.is_none());
+        app.receive(engine::Event::Info {
+            id: old,
+            info: engine::Info {
+                score: Some(engine::Score::Cp(999)),
+                ..Default::default()
+            },
+        });
+        app.receive(engine::Event::BestMove {
+            id: old,
+            best_move: Some("e2e4".into()),
+        });
+        assert_eq!(app.info.score, Some(engine::Score::Cp(25)));
+        assert!(
+            app.game_analysis
+                .as_ref()
+                .unwrap()
+                .status(true)
+                .contains("0/2 positions")
+        );
+        assert_eq!(app.game.line()[0].uci, "d2d4");
+        app.start_background_analysis();
+        assert!(app.background.is_some());
     }
     #[test]
     fn navigation_and_game_switch_invalidate_analysis() {
