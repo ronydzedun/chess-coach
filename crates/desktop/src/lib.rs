@@ -131,6 +131,8 @@ pub enum Message {
     CloseSettings,
     SettingsTab(SettingsTab),
     SettingsPath(String),
+    SettingsThreads(String),
+    SettingsHash(String),
     ApplySettings,
     SearchMode(SearchMode),
     SearchLimit(String),
@@ -158,8 +160,23 @@ pub enum Message {
 }
 impl App {
     pub fn subscription(&self) -> Subscription<Message> {
+        // Text inputs capture Escape to blur. The modal must close on that same key.
+        let modal_escape = if self.settings.is_some() {
+            iced::event::listen_with(|event, status, _| match event {
+                iced::Event::Keyboard(keyboard::Event::KeyPressed { key, .. })
+                    if status == iced::event::Status::Captured
+                        && key.as_ref() == keyboard::Key::Named(keyboard::key::Named::Escape) =>
+                {
+                    Some(Message::CloseSettings)
+                }
+                _ => None,
+            })
+        } else {
+            Subscription::none()
+        };
         Subscription::batch([
             keyboard::listen().map(Message::Key),
+            modal_escape,
             iced::time::every(std::time::Duration::from_millis(50)).map(|_| Message::Poll),
         ])
     }
@@ -214,13 +231,14 @@ impl App {
         self.info = engine::Info::default();
         self.best_move = None;
         self.analyzing = true;
-        self.engine_status = "Starting UCI engine…".into();
-        self.engine.analyze(
+        self.engine_status = "Preparing local analysis…".into();
+        self.engine.analyze_with_options(
             self.next_request,
             self.engine_path.trim().into(),
             self.game.fen(),
             self.game.turn() == Color::White,
             limit,
+            self.appearance.engine_options(),
         );
     }
     fn receive(&mut self, event: engine::Event) {
@@ -279,6 +297,8 @@ impl App {
                     | Message::CloseSettings
                     | Message::SettingsTab(_)
                     | Message::SettingsPath(_)
+                    | Message::SettingsThreads(_)
+                    | Message::SettingsHash(_)
                     | Message::ApplySettings
                     | Message::PieceSet(_)
                     | Message::Palette(_)
@@ -298,6 +318,8 @@ impl App {
             | Message::CloseSettings
             | Message::SettingsTab(_)
             | Message::SettingsPath(_)
+            | Message::SettingsThreads(_)
+            | Message::SettingsHash(_)
             | Message::ApplySettings => return self.update_settings(message),
             Message::Panel(tab) => self.panel_tab = tab,
             Message::PieceSet(_)
@@ -353,6 +375,7 @@ impl App {
                 self.promotion = None;
             }
             Message::New => {
+                self.engine.reset();
                 self.game.reset();
                 self.review.detach();
                 self.changed();
@@ -368,6 +391,7 @@ impl App {
             Message::FenChanged(value) => self.fen_input = value,
             Message::LoadFen => match self.game.load_fen(&self.fen_input) {
                 Ok(()) => {
+                    self.engine.reset();
                     self.review.detach();
                     self.changed();
                 }

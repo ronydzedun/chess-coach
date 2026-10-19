@@ -13,6 +13,33 @@ pub const PROTOCOL: &str = "UCI";
 const HANDSHAKE: Duration = Duration::from_secs(5);
 const POLL: Duration = Duration::from_millis(10);
 const MAX_EVENTS: usize = 128;
+const STOP_TIMEOUT: Duration = Duration::from_secs(1);
+
+/// Resource limits for a local engine. Hash is measured in MiB.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct EngineOptions {
+    pub threads: u16,
+    pub hash_mib: u32,
+}
+impl Default for EngineOptions {
+    fn default() -> Self {
+        Self {
+            threads: 1,
+            hash_mib: 16,
+        }
+    }
+}
+impl EngineOptions {
+    pub fn validate(self) -> Result<(), String> {
+        if !(1..=1024).contains(&self.threads) {
+            return Err("Threads must be between 1 and 1024".into());
+        }
+        if !(1..=4096).contains(&self.hash_mib) {
+            return Err("Hash must be between 1 and 4096 MiB".into());
+        }
+        Ok(())
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Limit {
@@ -77,12 +104,14 @@ struct Request {
     fen: String,
     white_to_move: bool,
     limit: Limit,
+    options: EngineOptions,
 }
 #[derive(Default)]
 struct Shared {
     token: AtomicU64,
     id: AtomicU64,
     shutdown: AtomicBool,
+    reset: AtomicU64,
     pending: Mutex<Option<Request>>,
     wake: Condvar,
     events: Mutex<VecDeque<(u64, Event)>>,
@@ -126,21 +155,36 @@ impl Engine {
         let shared = Arc::new(Shared::default());
         let state = shared.clone();
         let worker = thread::spawn(move || {
+            let mut session: Option<Session> = None;
+            let mut reset = 0;
             loop {
                 let request = {
                     let mut pending = state.pending.lock().unwrap();
-                    while pending.is_none() && !state.shutdown.load(Ordering::Acquire) {
-                        pending = state.wake.wait(pending).unwrap();
+                    if pending.is_none() && !state.shutdown.load(Ordering::Acquire) {
+                        pending = state.wake.wait_timeout(pending, POLL).unwrap().0;
                     }
-                    if state.shutdown.load(Ordering::Acquire) {
-                        break;
-                    }
-                    pending.take().unwrap()
+                    pending.take()
                 };
+                if state.shutdown.load(Ordering::Acquire) {
+                    break;
+                }
+                let generation = state.reset.load(Ordering::Acquire);
+                if generation != reset {
+                    session = None;
+                    reset = generation;
+                }
+                if let Some(current) = session.as_mut() {
+                    // Keep unsolicited idle output bounded and notice exited engines.
+                    current.process.drain();
+                    if !current.process.alive() {
+                        session = None;
+                    }
+                }
+                let Some(request) = request else { continue };
                 if state.cancelled(request.token) {
                     continue;
                 }
-                if let Err(message) = run(&state, &request) {
+                if let Err(message) = run(&state, &request, &mut session) {
                     state.publish(
                         request.token,
                         Event::Error {
@@ -157,6 +201,24 @@ impl Engine {
         }
     }
     pub fn analyze(&self, id: u64, path: PathBuf, fen: String, white_to_move: bool, limit: Limit) {
+        self.analyze_with_options(
+            id,
+            path,
+            fen,
+            white_to_move,
+            limit,
+            EngineOptions::default(),
+        );
+    }
+    pub fn analyze_with_options(
+        &self,
+        id: u64,
+        path: PathBuf,
+        fen: String,
+        white_to_move: bool,
+        limit: Limit,
+        options: EngineOptions,
+    ) {
         let mut pending = self.shared.pending.lock().unwrap();
         let token = self.shared.token.fetch_add(1, Ordering::AcqRel) + 1;
         self.shared.id.store(id, Ordering::Release);
@@ -168,6 +230,7 @@ impl Engine {
             fen,
             white_to_move,
             limit,
+            options,
         });
         self.shared.wake.notify_one();
     }
@@ -175,6 +238,7 @@ impl Engine {
         let mut pending = self.shared.pending.lock().unwrap();
         let token = self.shared.token.fetch_add(1, Ordering::AcqRel) + 1;
         *pending = None;
+        self.shared.wake.notify_one();
         self.shared.events.lock().unwrap().clear();
         self.shared.publish(
             token,
@@ -182,6 +246,16 @@ impl Engine {
                 id: self.shared.id.load(Ordering::Acquire),
             },
         );
+    }
+    /// Cancel analysis and release the process, including an idle hash table.
+    /// The worker performs cleanup asynchronously; the next request starts fresh.
+    pub fn reset(&self) {
+        let mut pending = self.shared.pending.lock().unwrap();
+        self.shared.token.fetch_add(1, Ordering::AcqRel);
+        self.shared.reset.fetch_add(1, Ordering::AcqRel);
+        *pending = None;
+        self.shared.events.lock().unwrap().clear();
+        self.shared.wake.notify_one();
     }
     pub fn try_recv(&self) -> Option<Event> {
         let mut events = self.shared.events.lock().unwrap();
@@ -305,7 +379,8 @@ impl Process {
                             let critical = matches!(
                                 value.split_whitespace().next(),
                                 Some("uciok" | "readyok" | "bestmove")
-                            );
+                            ) || value.starts_with("option name Threads ")
+                                || value.starts_with("option name Hash ");
                             loop {
                                 if stop.load(Ordering::Acquire) {
                                     return;
@@ -344,10 +419,28 @@ impl Process {
             .and_then(|()| self.input.flush())
             .map_err(|e| format!("Engine input failed: {e}"))
     }
-    fn wait_for(&mut self, shared: &Shared, token: u64, expected: &str) -> Result<bool, String> {
-        let deadline = Instant::now() + HANDSHAKE;
+    fn alive(&mut self) -> bool {
+        matches!(self.child.try_wait(), Ok(None))
+    }
+    fn drain(&self) {
+        for _ in 0..128 {
+            if self.lines.try_recv().is_err() {
+                break;
+            }
+        }
+    }
+    fn wait_for(
+        &mut self,
+        shared: &Shared,
+        token: Option<u64>,
+        expected: &str,
+        timeout: Duration,
+    ) -> Result<bool, String> {
+        let deadline = Instant::now() + timeout;
         while Instant::now() < deadline {
-            if shared.cancelled(token) {
+            if shared.shutdown.load(Ordering::Acquire)
+                || token.is_some_and(|token| shared.cancelled(token))
+            {
                 return Ok(false);
             }
             match self.lines.recv_timeout(POLL) {
@@ -355,8 +448,38 @@ impl Process {
                 Ok(_) | Err(mpsc::RecvTimeoutError::Timeout) => {}
                 Err(_) => return Err(format!("Engine exited before {expected}")),
             }
+            if !self.alive() {
+                return Err(format!("Engine exited before {expected}"));
+            }
         }
         Err(format!("Engine timed out waiting for {expected}"))
+    }
+    fn handshake(&mut self, shared: &Shared, request: &Request) -> Result<bool, String> {
+        self.send("uci")?;
+        let deadline = Instant::now() + HANDSHAKE;
+        let mut options = AdvertisedOptions::default();
+        loop {
+            if shared.cancelled(request.token) {
+                return Ok(false);
+            }
+            if Instant::now() >= deadline {
+                return Err("Engine timed out waiting for uciok".into());
+            }
+            match self.lines.recv_timeout(POLL) {
+                Ok(line) if line == "uciok" => break,
+                Ok(line) => options.parse(&line)?,
+                Err(mpsc::RecvTimeoutError::Timeout) if self.alive() => {}
+                Err(_) => return Err("Engine exited before uciok".into()),
+            }
+        }
+        // Validate both options before changing either, then allocate Hash last.
+        let threads = options.command("Threads", u32::from(request.options.threads), 1)?;
+        let hash = options.command("Hash", request.options.hash_mib, 16)?;
+        for command in [threads, hash].into_iter().flatten() {
+            self.send(&command)?;
+        }
+        self.send("isready")?;
+        self.wait_for(shared, Some(request.token), "readyok", HANDSHAKE)
     }
 }
 impl Drop for Process {
@@ -382,20 +505,112 @@ impl Drop for Process {
     }
 }
 
-fn run(shared: &Shared, request: &Request) -> Result<(), String> {
+#[derive(Clone, Copy)]
+struct Spin {
+    min: u32,
+    max: u32,
+}
+#[derive(Default)]
+struct AdvertisedOptions {
+    threads: Option<Spin>,
+    hash: Option<Spin>,
+}
+impl AdvertisedOptions {
+    fn parse(&mut self, line: &str) -> Result<(), String> {
+        let words: Vec<_> = line.split_whitespace().collect();
+        if words.len() < 3 || words[..2] != ["option", "name"] {
+            return Ok(());
+        }
+        let target = match words[2] {
+            "Threads" => &mut self.threads,
+            "Hash" => &mut self.hash,
+            _ => return Ok(()),
+        };
+        let bound = |key| {
+            words
+                .windows(2)
+                .find(|pair| pair[0] == key)
+                .and_then(|pair| pair[1].parse::<u32>().ok())
+        };
+        let min = bound("min");
+        let max = bound("max");
+        if words.get(3..5) != Some(&["type", "spin"])
+            || min.zip(max).is_none_or(|(min, max)| min > max)
+        {
+            return Err(format!(
+                "Engine advertises invalid {} spin option",
+                words[2]
+            ));
+        }
+        *target = Some(Spin {
+            min: min.unwrap(),
+            max: max.unwrap(),
+        });
+        Ok(())
+    }
+    fn command(&self, name: &str, value: u32, legacy: u32) -> Result<Option<String>, String> {
+        let bounds = if name == "Threads" {
+            self.threads
+        } else {
+            self.hash
+        };
+        match bounds {
+            Some(bounds) if (bounds.min..=bounds.max).contains(&value) => {
+                Ok(Some(format!("setoption name {name} value {value}")))
+            }
+            Some(bounds) => Err(format!(
+                "Engine {name} supports {}..={}, requested {value}",
+                bounds.min, bounds.max
+            )),
+            None if value == legacy => Ok(None),
+            None => Err(format!(
+                "Engine does not advertise {name}; cannot apply {value}"
+            )),
+        }
+    }
+}
+struct Session {
+    process: Process,
+    path: PathBuf,
+    options: EngineOptions,
+}
+fn run(shared: &Shared, request: &Request, cached: &mut Option<Session>) -> Result<(), String> {
+    request.options.validate()?;
     if request.fen.len() > 1024 || request.fen.contains(['\n', '\r']) {
         return Err("Invalid FEN command".into());
     }
-    let mut process = Process::spawn(&request.path)?;
-    process.send("uci")?;
-    if !process.wait_for(shared, request.token, "uciok")? {
-        return Ok(());
+    if cached.as_mut().is_some_and(|session| {
+        session.path != request.path
+            || session.options != request.options
+            || !session.process.alive()
+    }) {
+        *cached = None;
     }
+    let mut session = match cached.take() {
+        Some(session) => session,
+        None => {
+            let mut process = Process::spawn(&request.path)?;
+            if !process.handshake(shared, request)? {
+                return Ok(());
+            }
+            Session {
+                process,
+                path: request.path.clone(),
+                options: request.options,
+            }
+        }
+    };
+    let process = &mut session.process;
+    process.drain();
     process.send("isready")?;
-    if !process.wait_for(shared, request.token, "readyok")? {
+    if !process.wait_for(shared, Some(request.token), "readyok", HANDSHAKE)? {
         return Ok(());
     }
     shared.publish(request.token, Event::Ready { id: request.id });
+    if shared.cancelled(request.token) {
+        *cached = Some(session);
+        return Ok(());
+    }
     process.send(&format!("position fen {}", request.fen))?;
     let (command, duration) = match request.limit {
         Limit::Depth(depth) => (
@@ -414,12 +629,14 @@ fn run(shared: &Shared, request: &Request) -> Result<(), String> {
     let deadline = Instant::now() + duration;
     let mut stop_deadline = None;
     loop {
-        if shared.cancelled(request.token) {
+        if shared.shutdown.load(Ordering::Acquire) {
             return Ok(());
         }
-        if Instant::now() >= deadline && stop_deadline.is_none() {
+        if (shared.cancelled(request.token) || Instant::now() >= deadline)
+            && stop_deadline.is_none()
+        {
             process.send("stop")?;
-            stop_deadline = Some(Instant::now() + Duration::from_secs(1));
+            stop_deadline = Some(Instant::now() + STOP_TIMEOUT);
         }
         if stop_deadline.is_some_and(|deadline| Instant::now() >= deadline) {
             return Err("Engine did not finish after stop".into());
@@ -434,6 +651,12 @@ fn run(shared: &Shared, request: &Request) -> Result<(), String> {
                             best_move,
                         },
                     );
+                    // An old search is fully consumed before the next position.
+                    // Ignore replacement tokens during this short cleanup barrier.
+                    process.send("isready")?;
+                    if process.wait_for(shared, None, "readyok", STOP_TIMEOUT)? {
+                        *cached = Some(session);
+                    }
                     return Ok(());
                 }
                 if let Some(mut info) = parse_info(&line) {
@@ -449,11 +672,12 @@ fn run(shared: &Shared, request: &Request) -> Result<(), String> {
                     );
                 }
             }
-            Err(mpsc::RecvTimeoutError::Timeout) => {}
+            Err(mpsc::RecvTimeoutError::Timeout) if process.alive() => {}
             Err(_) => return Err("Engine exited during analysis".into()),
         }
     }
 }
+
 fn is_move(value: &str) -> bool {
     let b = value.as_bytes();
     (b.len() == 4 || b.len() == 5)

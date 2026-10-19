@@ -227,6 +227,8 @@ impl BoardPalette {
 pub struct Settings {
     pub piece_set: PieceSet,
     pub engine_path: Option<String>,
+    pub engine_threads: u16,
+    pub engine_hash_mib: u32,
     pub custom_palettes: Vec<BoardPalette>,
     pub selected_palette: String,
 }
@@ -236,13 +238,29 @@ impl Default for Settings {
         Self {
             piece_set: PieceSet::default(),
             engine_path: None,
+            engine_threads: recommended_engine_threads(),
+            engine_hash_mib: 256,
             custom_palettes: Vec::new(),
             selected_palette: "Classic".into(),
         }
     }
 }
 
+/// Reserve CPU capacity for the interface and other applications.
+pub fn recommended_engine_threads() -> u16 {
+    (std::thread::available_parallelism()
+        .map(usize::from)
+        .unwrap_or(1)
+        / 2)
+    .clamp(1, 8) as u16
+}
 impl Settings {
+    pub fn engine_options(&self) -> engine::EngineOptions {
+        engine::EngineOptions {
+            threads: self.engine_threads,
+            hash_mib: self.engine_hash_mib,
+        }
+    }
     pub fn palettes(&self) -> Vec<BoardPalette> {
         let mut palettes = BoardPalette::presets();
         palettes.extend(self.custom_palettes.clone());
@@ -292,6 +310,7 @@ impl Settings {
         {
             return Err("Engine path must contain 1–4096 bytes without NUL characters.".into());
         }
+        self.engine_options().validate()?;
         let mut checked = Self::default();
         for palette in &self.custom_palettes {
             checked.add_palette(palette.clone())?;
@@ -386,6 +405,8 @@ mod tests {
         let mut settings = Settings {
             piece_set: PieceSet::Celtic,
             engine_path: Some("/my engine/stockfish".into()),
+            engine_threads: 2,
+            engine_hash_mib: 128,
             ..Settings::default()
         };
         settings
@@ -417,6 +438,21 @@ mod tests {
         assert_eq!(settings.piece_set, PieceSet::Celtic);
         assert_eq!(settings.selected_palette, "Blue");
         assert!(settings.engine_path.is_none());
+        assert_eq!(settings.engine_threads, recommended_engine_threads());
+        assert_eq!(settings.engine_hash_mib, 256);
+    }
+
+    #[test]
+    fn invalid_resource_settings_are_rejected() {
+        for (threads, hash) in [(0, 256), (1025, 256), (2, 0), (2, 4097)] {
+            let settings = Settings {
+                engine_threads: threads,
+                engine_hash_mib: hash,
+                ..Settings::default()
+            };
+            assert!(settings.validate().is_err());
+        }
+        assert!((1..=8).contains(&recommended_engine_threads()));
     }
 
     #[test]

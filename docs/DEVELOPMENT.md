@@ -30,7 +30,7 @@ cargo test --workspace --locked
 cargo clippy --workspace --all-targets --locked -- -D warnings
 ```
 
-The chess rules and ordinary workspace tests do not need Stockfish. The `engine` crate launches a local UCI executable only when analysis is requested. Set `STOCKFISH_EXECUTABLE` to select a binary explicitly; otherwise discovery checks `PATH`, then `/usr/games/stockfish`. The real-engine test runs when `STOCKFISH_EXECUTABLE` is set and reports a skip otherwise. Portable fake UCI processes exercise handshake, cancellation, replacement, flooding, and cleanup on every platform:
+The chess rules and ordinary workspace tests do not need Stockfish. The `engine` crate launches a local UCI executable only when analysis is requested. Set `STOCKFISH_EXECUTABLE` to select a binary explicitly; otherwise discovery checks `PATH`, then `/usr/games/stockfish`. The real-engine test runs when `STOCKFISH_EXECUTABLE` is set and reports a skip otherwise. Portable fake UCI processes exercise handshake, advertised resource limits, process reuse, cancellation and late-result barriers, reset, idle exits, flooding, and active/idle cleanup on every platform:
 
 ```sh
 STOCKFISH_EXECUTABLE=/usr/games/stockfish cargo test -p engine --locked -- --nocapture

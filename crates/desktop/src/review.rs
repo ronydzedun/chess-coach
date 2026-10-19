@@ -148,6 +148,7 @@ impl App {
             self.notice = "Imported game is unavailable".into();
             return;
         };
+        self.engine.reset();
         self.game.load_line(&pgn.game);
         self.review.selected = self.review.choices.get(index).cloned();
         self.review.modified = false;

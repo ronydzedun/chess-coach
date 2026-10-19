@@ -127,18 +127,41 @@ fn stockfish_opt_in() {
         return;
     };
     let engine = Engine::new();
-    engine.analyze(
+    let path: PathBuf = path.into();
+    let options = engine::EngineOptions {
+        threads: 2,
+        hash_mib: 32,
+    };
+    engine.analyze_with_options(
         41,
-        path.into(),
+        path.clone(),
         "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1".into(),
         true,
         Limit::Depth(5),
+        options,
     );
     until(&engine, |event| {
         matches!(
             event,
             Event::BestMove {
                 id: 41,
+                best_move: Some(_)
+            }
+        )
+    });
+    engine.analyze_with_options(
+        42,
+        path,
+        "rnbqkbnr/pppp1ppp/8/4p3/4P3/8/PPPP1PPP/RNBQKBNR w KQkq - 0 2".into(),
+        true,
+        Limit::Depth(5),
+        options,
+    );
+    until(&engine, |event| {
+        matches!(
+            event,
+            Event::BestMove {
+                id: 42,
                 best_move: Some(_)
             }
         )
@@ -158,4 +181,369 @@ fn terminal_move_survives_output_flood() {
             }
         )
     });
+}
+
+struct FixtureDirectory(PathBuf);
+impl FixtureDirectory {
+    fn new(label: &str) -> Self {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let serial = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let path = std::env::temp_dir().join(format!(
+            "chess-coach-{label}-{}-{serial}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&path).unwrap();
+        Self(path)
+    }
+    fn executable(&self, mode: &str) -> PathBuf {
+        let path = self
+            .0
+            .join(format!("{mode}{}", std::env::consts::EXE_SUFFIX));
+        // Reusing the built inode avoids executing a freshly written file on
+        // filesystems that briefly retain a write lease after copy completes.
+        if std::fs::hard_link(fixture(), &path).is_err() {
+            std::fs::copy(fixture(), &path).unwrap();
+        }
+        path
+    }
+    fn position(&self, name: &str, behavior: &str) -> String {
+        format!("record:{}|{behavior}", self.0.join(name).display())
+    }
+    fn pid(&self, name: &str) -> String {
+        std::fs::read_to_string(self.0.join(name)).unwrap()
+    }
+}
+impl Drop for FixtureDirectory {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+fn best(engine: &Engine, id: u64) {
+    until(
+        engine,
+        |event| matches!(event, Event::BestMove { id: actual, best_move: Some(value) } if *actual == id && value == "e2e4"),
+    );
+}
+fn gone(pid: &str) {
+    #[cfg(target_os = "linux")]
+    {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while std::path::Path::new(&format!("/proc/{pid}")).exists() {
+            assert!(Instant::now() < deadline, "Process {pid} still alive");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    let _ = pid;
+}
+#[test]
+fn completed_and_cancelled_searches_reuse_process_and_discard_late_results() {
+    let directory = FixtureDirectory::new("reuse");
+    let engine = Engine::new();
+    engine.analyze(
+        60,
+        fixture(),
+        directory.position("first", "normal"),
+        true,
+        Limit::Depth(2),
+    );
+    best(&engine, 60);
+    engine.analyze(
+        61,
+        fixture(),
+        directory.position("second", "late"),
+        true,
+        Limit::Depth(2),
+    );
+    until(&engine, |event| matches!(event, Event::Info { id: 61, .. }));
+    engine.stop();
+    engine.analyze(
+        62,
+        fixture(),
+        directory.position("third", "normal"),
+        true,
+        Limit::Depth(2),
+    );
+    loop {
+        match until(&engine, |_| true) {
+            Event::Ready { id: 62 } => {}
+            Event::Info { id: 62, info } => assert_eq!(info.score, Some(Score::Cp(42))),
+            Event::BestMove { id: 62, best_move } => {
+                assert_eq!(best_move.as_deref(), Some("e2e4"));
+                break;
+            }
+            event => panic!("Unexpected old search event {event:?}"),
+        }
+    }
+    assert_eq!(directory.pid("first"), directory.pid("second"));
+    assert_eq!(directory.pid("first"), directory.pid("third"));
+    let pid = directory.pid("third");
+    std::thread::sleep(Duration::from_millis(50));
+    drop(engine);
+    gone(&pid);
+}
+#[test]
+fn options_are_ordered_and_reapplied_only_after_restart() {
+    use engine::EngineOptions;
+    let directory = FixtureDirectory::new("options");
+    let executable = directory.executable("optionflood-audit");
+    let engine = Engine::new();
+    let options = EngineOptions {
+        threads: 8,
+        hash_mib: 256,
+    };
+    engine.analyze_with_options(
+        70,
+        executable.clone(),
+        directory.position("first", "normal"),
+        true,
+        Limit::Depth(2),
+        options,
+    );
+    best(&engine, 70);
+    engine.analyze_with_options(
+        71,
+        executable.clone(),
+        directory.position("second", "normal"),
+        true,
+        Limit::Depth(2),
+        options,
+    );
+    best(&engine, 71);
+    assert_eq!(directory.pid("first"), directory.pid("second"));
+    let commands = std::fs::read_to_string(executable.with_extension("commands")).unwrap();
+    assert!(
+        commands.starts_with(
+            "uci\nsetoption name Threads value 8\nsetoption name Hash value 256\nisready\n"
+        ),
+        "{commands}"
+    );
+    assert_eq!(commands.matches("setoption name").count(), 2);
+    assert!(!commands.contains("ucinewgame"));
+    engine.analyze_with_options(
+        72,
+        executable,
+        directory.position("third", "normal"),
+        true,
+        Limit::Depth(2),
+        EngineOptions {
+            threads: 2,
+            hash_mib: 32,
+        },
+    );
+    best(&engine, 72);
+    assert_ne!(directory.pid("first"), directory.pid("third"));
+    gone(&directory.pid("first"));
+}
+#[test]
+fn option_validation_and_generic_legacy_defaults() {
+    use engine::EngineOptions;
+    assert!(EngineOptions::default().validate().is_ok());
+    assert!(
+        EngineOptions {
+            threads: 1024,
+            hash_mib: 4096
+        }
+        .validate()
+        .is_ok()
+    );
+    let directory = FixtureDirectory::new("validation");
+    let engine = Engine::new();
+    let cases = [
+        (
+            EngineOptions {
+                threads: 0,
+                hash_mib: 16,
+            },
+            fixture(),
+            "Threads must",
+        ),
+        (
+            EngineOptions {
+                threads: 1025,
+                hash_mib: 16,
+            },
+            fixture(),
+            "Threads must",
+        ),
+        (
+            EngineOptions {
+                threads: 1,
+                hash_mib: 0,
+            },
+            fixture(),
+            "Hash must",
+        ),
+        (
+            EngineOptions {
+                threads: 1,
+                hash_mib: 4097,
+            },
+            fixture(),
+            "Hash must",
+        ),
+        (
+            EngineOptions {
+                threads: 3,
+                hash_mib: 16,
+            },
+            directory.executable("limited-threads"),
+            "Threads supports",
+        ),
+        (
+            EngineOptions {
+                threads: 1,
+                hash_mib: 33,
+            },
+            directory.executable("limited-hash"),
+            "Hash supports",
+        ),
+        (
+            EngineOptions {
+                threads: 2,
+                hash_mib: 16,
+            },
+            directory.executable("nooptions-threads"),
+            "does not advertise Threads",
+        ),
+        (
+            EngineOptions {
+                threads: 1,
+                hash_mib: 32,
+            },
+            directory.executable("nooptions-hash"),
+            "does not advertise Hash",
+        ),
+        (
+            EngineOptions::default(),
+            directory.executable("malformed"),
+            "invalid Threads spin",
+        ),
+    ];
+    for (index, (options, path, message)) in cases.into_iter().enumerate() {
+        let id = 80 + index as u64;
+        engine.analyze_with_options(id, path, "normal".into(), true, Limit::Depth(2), options);
+        let event = until(&engine, |event| matches!(event, Event::Error { .. }));
+        assert!(matches!(event, Event::Error { message: value, .. } if value.contains(message)));
+    }
+    engine.analyze(
+        99,
+        directory.executable("nooptions-default"),
+        "normal".into(),
+        true,
+        Limit::Depth(2),
+    );
+    best(&engine, 99);
+}
+#[test]
+fn unresponsive_stop_restarts_and_reaps_process() {
+    let directory = FixtureDirectory::new("unresponsive");
+    let engine = Engine::new();
+    engine.analyze(
+        100,
+        fixture(),
+        directory.position("first", "unresponsive"),
+        true,
+        Limit::Depth(2),
+    );
+    until(&engine, |event| {
+        matches!(event, Event::Info { id: 100, .. })
+    });
+    let start = Instant::now();
+    engine.analyze(
+        101,
+        fixture(),
+        directory.position("second", "normal"),
+        true,
+        Limit::Depth(2),
+    );
+    best(&engine, 101);
+    assert!(start.elapsed() < Duration::from_secs(3));
+    assert_ne!(directory.pid("first"), directory.pid("second"));
+    gone(&directory.pid("first"));
+}
+#[test]
+fn reset_releases_idle_hash_and_next_request_starts_fresh() {
+    let directory = FixtureDirectory::new("reset");
+    let engine = Engine::new();
+    engine.analyze(
+        110,
+        fixture(),
+        directory.position("first", "normal"),
+        true,
+        Limit::Depth(2),
+    );
+    best(&engine, 110);
+    engine.reset();
+    gone(&directory.pid("first"));
+    engine.analyze(
+        111,
+        fixture(),
+        directory.position("second", "slow"),
+        true,
+        Limit::Depth(2),
+    );
+    until(&engine, |event| {
+        matches!(event, Event::Info { id: 111, .. })
+    });
+    engine.reset();
+    engine.analyze(
+        112,
+        fixture(),
+        directory.position("third", "normal"),
+        true,
+        Limit::Depth(2),
+    );
+    best(&engine, 112);
+    assert_ne!(directory.pid("first"), directory.pid("second"));
+    assert_ne!(directory.pid("second"), directory.pid("third"));
+    gone(&directory.pid("second"));
+}
+#[test]
+fn idle_exit_and_idle_output_do_not_prevent_next_search() {
+    let directory = FixtureDirectory::new("idle");
+    let engine = Engine::new();
+    engine.analyze(
+        120,
+        fixture(),
+        directory.position("first", "exit"),
+        true,
+        Limit::Depth(2),
+    );
+    best(&engine, 120);
+    std::thread::sleep(Duration::from_millis(100));
+    engine.analyze(
+        121,
+        fixture(),
+        directory.position("second", "idleflood"),
+        true,
+        Limit::Depth(2),
+    );
+    best(&engine, 121);
+    assert_ne!(directory.pid("first"), directory.pid("second"));
+    std::thread::sleep(Duration::from_millis(100));
+    engine.analyze(
+        122,
+        fixture(),
+        directory.position("third", "normal"),
+        true,
+        Limit::Depth(2),
+    );
+    best(&engine, 122);
+    assert_eq!(directory.pid("second"), directory.pid("third"));
+}
+#[cfg(unix)]
+#[test]
+fn inherited_stdout_does_not_hold_worker_open() {
+    let directory = FixtureDirectory::new("wrapper");
+    let engine = Engine::new();
+    use std::os::unix::fs::PermissionsExt;
+    let wrapper = directory.0.join("inherited");
+    std::fs::write(&wrapper, "#!/bin/sh\nsleep 3 &\nexit 0\n").unwrap();
+    std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o755)).unwrap();
+    engine.analyze(130, wrapper, "normal".into(), true, Limit::Depth(2));
+    std::thread::sleep(Duration::from_millis(80));
+    let start = Instant::now();
+    drop(engine);
+    assert!(start.elapsed() < Duration::from_secs(1));
 }

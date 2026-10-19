@@ -56,6 +56,10 @@ Automatic analysis runs by default after launch and relevant position changes. U
 
 Click a piece, then its destination. Ctrl/Cmd+O opens PGN import, Ctrl/Cmd+N starts a new game, Ctrl/Cmd+Z undoes, Ctrl/Cmd+F flips; Escape cancels a selection or promotion. FEN can be submitted with Enter. No network service, account, telemetry or external API is required.
 
+**Settings → Engine** also exposes **Threads** (1–1024) and **Hash (MiB)** (1–4096). Defaults use half the available logical CPU threads, capped at 8 and at least 1, plus 256 MiB of Hash. Values are saved with Apply; Cancel/Escape leave the active configuration unchanged. The engine's advertised limits are checked during initialization. Non-default settings require the corresponding UCI options. Hash is the search-cache size; the engine also uses memory for its networks and other data.
+
+Stockfish stays running between related position searches, retaining its cache. Changing engine settings restarts it and releases the previous allocation. Turning analysis OFF stops the search while keeping the idle process/cache for reuse; closing the app terminates it. More threads can increase search work within the time limit, but do not make a 1000 ms search return immediately. Speedups depend on position and hardware. See [Stockfish's settings guidance](https://official-stockfish.github.io/docs/stockfish-wiki/Stockfish-FAQ.html#optimal-settings).
+
 ## Validation and platform status
 
 ```sh
