@@ -23,7 +23,7 @@ pub(super) struct Background {
     info: engine::Info,
 }
 fn same_configuration(a: &Key, b: &Key) -> bool {
-    a.engine_path == b.engine_path && a.options == b.options && a.limit == b.limit
+    a.engine_path == b.engine_path && a.limit == b.limit
 }
 fn merge(target: &mut engine::Info, info: engine::Info) {
     if info.depth.is_some() {
@@ -58,6 +58,8 @@ impl GameAnalysis {
     }
     pub fn configure(&mut self, key: &Key) -> bool {
         if same_configuration(&self.configuration, key) {
+            // Keep scores, but use updated resources for every subsequent search.
+            self.configuration.options = key.options;
             return false;
         }
         self.configuration = key.clone();
@@ -95,6 +97,40 @@ impl GameAnalysis {
                 position.result = result.clone();
             }
         }
+    }
+    pub fn report_data(&self, current_fen: &str) -> (Vec<Option<f32>>, Option<usize>) {
+        let scores = self
+            .positions
+            .iter()
+            .map(|position| {
+                position
+                    .result
+                    .as_ref()?
+                    .info
+                    .score
+                    .map(|score| match score {
+                        engine::Score::Cp(cp) => cp as f32 / 100.0,
+                        engine::Score::Mate(0) => {
+                            if position.white {
+                                -10.0
+                            } else {
+                                10.0
+                            }
+                        }
+                        engine::Score::Mate(n) => {
+                            if n > 0 {
+                                10.0
+                            } else {
+                                -10.0
+                            }
+                        }
+                    })
+            })
+            .collect();
+        (
+            scores,
+            self.positions.iter().position(|p| p.fen == current_fen),
+        )
     }
     pub fn status(&self, enabled: bool) -> String {
         let completed = self.positions.iter().filter(|p| p.result.is_some()).count();
@@ -429,6 +465,62 @@ mod tests {
         assert!(app.analysis_due.is_some());
     }
     #[test]
+    fn resource_changes_retain_completed_scores_and_resume_only_pending_positions() {
+        let mut app = app();
+        complete_current(&mut app, 35);
+        app.start_background_analysis();
+        finish_background(&mut app, -40);
+        app.start_background_analysis();
+        let old = app.background.as_ref().unwrap().id;
+        app.appearance.engine_threads = 2;
+        app.appearance.engine_hash_mib = 128;
+        app.engine.reset();
+        let path = app.engine_path.clone();
+        send(&mut app, Message::EnginePath(path));
+        assert_eq!(app.info.score, Some(engine::Score::Cp(35)));
+        assert!(
+            app.game_analysis
+                .as_ref()
+                .unwrap()
+                .status(true)
+                .contains("2/4")
+        );
+        assert!(app.analysis_due.is_none());
+        app.receive(engine::Event::BestMove {
+            id: old,
+            best_move: None,
+        });
+        app.start_background_analysis();
+        let request = app.background.as_ref().unwrap();
+        assert_eq!(request.key.options, app.appearance.engine_options());
+        assert_eq!(
+            request.key.fen,
+            app.game_analysis.as_ref().unwrap().positions[2].fen
+        );
+        finish_background(&mut app, 70);
+        app.start_background_analysis();
+        finish_background(&mut app, 90);
+        assert!(
+            app.game_analysis
+                .as_ref()
+                .unwrap()
+                .status(true)
+                .contains("4/4")
+        );
+        send(&mut app, Message::Seek(1));
+        assert_eq!(app.info.score, Some(engine::Score::Cp(-40)));
+        send(&mut app, Message::SearchMode(crate::SearchMode::Depth));
+        assert!(
+            app.game_analysis
+                .as_ref()
+                .unwrap()
+                .positions
+                .iter()
+                .all(|p| p.result.is_none())
+        );
+        assert!(app.analysis_due.is_some());
+    }
+    #[test]
     fn off_settings_and_new_game_pause_restart_or_clear_the_queue() {
         let mut app = app();
         complete_current(&mut app, 35);
@@ -599,6 +691,39 @@ mod tests {
         }
         assert_eq!(app.next_request, requests);
         assert_eq!(app.game.line().len(), 300);
+    }
+    #[test]
+    fn report_scores_keep_gaps_and_white_relative_mate_signs() {
+        let mut app = app();
+        complete_current(&mut app, 125);
+        let batch = app.game_analysis.as_mut().unwrap();
+        for (index, score) in [
+            (1, engine::Score::Mate(0)),
+            (2, engine::Score::Mate(0)),
+            (3, engine::Score::Mate(-3)),
+        ] {
+            let mut key = batch.configuration.clone();
+            key.fen = batch.positions[index].fen.clone();
+            batch.record(
+                &key,
+                Some(Result {
+                    info: engine::Info {
+                        score: Some(score),
+                        ..Default::default()
+                    },
+                    best_move: None,
+                }),
+            );
+        }
+        let (scores, selected) = batch.report_data(&app.game.fen());
+        assert_eq!(
+            scores,
+            vec![Some(1.25), Some(10.0), Some(-10.0), Some(-10.0)]
+        );
+        assert_eq!(selected, Some(0));
+        batch.positions[2].result = None;
+        assert_eq!(batch.report_data("different working branch").0[2], None);
+        assert_eq!(batch.report_data("different working branch").1, None);
     }
     #[test]
     fn setup_fen_preserves_side_and_position_count_is_bounded_by_line() {

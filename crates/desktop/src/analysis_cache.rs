@@ -11,6 +11,12 @@ pub(super) struct Key {
     pub options: engine::EngineOptions,
     pub limit: engine::Limit,
 }
+impl Key {
+    // Resource allocation changes execution, not the requested analysis criterion.
+    pub fn same_analysis(&self, other: &Self) -> bool {
+        self.fen == other.fen && self.engine_path == other.engine_path && self.limit == other.limit
+    }
+}
 #[derive(Debug, Clone)]
 pub(super) struct Result {
     pub info: engine::Info,
@@ -23,14 +29,21 @@ pub(super) struct Cache {
 }
 impl Cache {
     pub fn get(&mut self, key: &Key) -> Option<Result> {
-        let index = self.entries.iter().position(|(entry, _)| entry == key)?;
+        let index = self
+            .entries
+            .iter()
+            .position(|(entry, _)| entry.same_analysis(key))?;
         let entry = self.entries.remove(index)?;
         let result = entry.1.clone();
         self.entries.push_back(entry);
         Some(result)
     }
     pub fn insert(&mut self, key: Key, result: Result) {
-        if let Some(index) = self.entries.iter().position(|(entry, _)| entry == &key) {
+        if let Some(index) = self
+            .entries
+            .iter()
+            .position(|(entry, _)| entry.same_analysis(&key))
+        {
             self.entries.remove(index);
         }
         if self.entries.len() == CAPACITY {
@@ -78,7 +91,7 @@ mod tests {
         );
     }
     #[test]
-    fn position_engine_resources_and_search_limit_are_part_of_identity() {
+    fn position_engine_and_search_limit_define_identity_but_resources_do_not() {
         let mut cache = Cache::default();
         let original = key("position w - - 0 1");
         cache.insert(original.clone(), result(12));
@@ -90,8 +103,8 @@ mod tests {
         variants[4].limit = engine::Limit::Depth(20);
         variants[5].limit = engine::Limit::TimeMs(2000);
         variants[6].fen = "position w - - 1 2".into();
-        for variant in variants {
-            assert!(cache.get(&variant).is_none());
+        for (index, variant) in variants.into_iter().enumerate() {
+            assert_eq!(cache.get(&variant).is_some(), matches!(index, 2 | 3));
         }
         assert!(cache.get(&original).is_some());
     }

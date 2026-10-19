@@ -7,6 +7,7 @@ mod board_input;
 mod evaluation;
 mod game_analysis;
 pub mod import;
+mod report;
 mod review;
 mod settings_ui;
 pub use settings_ui::SettingsTab;
@@ -37,6 +38,7 @@ pub enum PanelTab {
     #[default]
     Analysis,
     Moves,
+    Report,
 }
 pub struct App {
     settings: Option<settings_ui::Dialog>,
@@ -160,6 +162,7 @@ pub enum Message {
     Poll,
     Key(keyboard::Event),
     Seek(usize),
+    ReportSeek(usize),
     Panel(PanelTab),
     PieceSet(appearance::PieceSet),
     Palette(String),
@@ -457,6 +460,7 @@ impl App {
             | Message::SettingsHash(_)
             | Message::ApplySettings => return self.update_settings(message),
             Message::Panel(tab) => self.panel_tab = tab,
+            Message::ReportSeek(ply) => self.seek_report_position(ply),
             Message::PieceSet(_)
             | Message::Palette(_)
             | Message::PaletteName(_)
@@ -832,9 +836,24 @@ impl App {
         .spacing(12);
         panel.into()
     }
+    fn report_view(&self) -> Element<'_, Message> {
+        let Some(batch) = &self.game_analysis else {
+            return text("Import a PGN game to see its report.").into();
+        };
+        let (scores, selected) = batch.report_data(&self.game.fen());
+        column![
+            text("Преимущество").size(22),
+            text("White's perspective · click the graph to open a position")
+                .size(12).color(theme::MUTED),
+            report::chart(scores, selected.unwrap_or(usize::MAX)),
+            text("Scale: −10 to +10 pawns; mate is shown at the edge. Gaps are positions without a completed score.")
+                .size(12).color(theme::MUTED),
+        ].spacing(12).into()
+    }
     fn panel(&self) -> Element<'_, Message> {
         let analysis = self.panel_tab == PanelTab::Analysis;
         let moves = self.panel_tab == PanelTab::Moves;
+        let report = self.panel_tab == PanelTab::Report;
         let tabs = row![
             button("Analysis")
                 .on_press(Message::Panel(PanelTab::Analysis))
@@ -846,6 +865,17 @@ impl App {
             button("Moves")
                 .on_press(Message::Panel(PanelTab::Moves))
                 .style(move |theme, status| if moves {
+                    button::primary(theme, status)
+                } else {
+                    button::text(theme, status)
+                }),
+            button("Отчёт")
+                .on_press_maybe(
+                    self.game_analysis
+                        .as_ref()
+                        .map(|_| Message::Panel(PanelTab::Report))
+                )
+                .style(move |theme, status| if report {
                     button::primary(theme, status)
                 } else {
                     button::text(theme, status)
@@ -875,6 +905,7 @@ impl App {
         panel = panel.push(match self.panel_tab {
             PanelTab::Analysis => self.engine_controls(),
             PanelTab::Moves => self.move_list(),
+            PanelTab::Report => self.report_view(),
         });
         scrollable(
             container(panel)

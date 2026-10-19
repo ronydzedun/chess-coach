@@ -143,6 +143,26 @@ impl App {
         }
         Task::none()
     }
+    pub(super) fn seek_report_position(&mut self, ply: usize) {
+        let Some(choice) = &self.review.selected else {
+            return;
+        };
+        let Some(original) = self.review.games.get(choice.index) else {
+            return;
+        };
+        if ply > original.game.line().len() {
+            return;
+        }
+        if self.review.modified {
+            // The report belongs to the imported main line, not a working branch.
+            self.game.load_line(&original.game);
+            self.game.seek(ply).expect("validated report index");
+            self.review.modified = false;
+            self.changed();
+        } else {
+            let _ = self.update(Message::Seek(ply));
+        }
+    }
     fn select_game(&mut self, index: usize) {
         let games = Arc::clone(&self.review.games);
         let Some(pgn) = games.get(index) else {
@@ -293,6 +313,43 @@ mod tests {
         assert_eq!(app.game.ply(), 0);
         assert_eq!(app.game.line().len(), 3);
         assert!(!app.review.modified);
+    }
+    #[test]
+    fn report_navigation_restores_original_line_without_replacing_analysis() {
+        let mut app = App::default();
+        apply(&mut app, "1. e4 e5 2. Nf3 *");
+        let key = app.analysis_key().unwrap();
+        let result = crate::analysis_cache::Result {
+            info: engine::Info {
+                score: Some(engine::Score::Cp(42)),
+                ..Default::default()
+            },
+            best_move: Some("e2e4".into()),
+        };
+        app.game_analysis
+            .as_mut()
+            .unwrap()
+            .record(&key, Some(result));
+        send(&mut app, Message::Panel(crate::PanelTab::Report));
+        send(&mut app, Message::Square(Square::D2));
+        send(&mut app, Message::Square(Square::D4));
+        assert!(app.review.modified);
+        let branch = app.game.fen();
+        send(&mut app, Message::ReportSeek(999));
+        assert_eq!(app.game.fen(), branch);
+        send(&mut app, Message::ReportSeek(3));
+        assert!(!app.review.modified);
+        assert_eq!(app.game.ply(), 3);
+        assert_eq!(app.game.line()[0].uci, "e2e4");
+        assert_eq!(app.game.line().len(), 3);
+        assert!(app.game_analysis.as_ref().unwrap().get(&key).is_some());
+        send(&mut app, Message::ReportSeek(0));
+        assert_eq!(app.info.score, Some(engine::Score::Cp(42)));
+        assert_eq!(app.panel_tab, crate::PanelTab::Report);
+        let _ = app.view();
+        send(&mut app, Message::New);
+        let _ = app.view();
+        assert!(app.game_analysis.is_none());
     }
     #[test]
     fn review_tab_and_headerless_result_are_preserved() {
