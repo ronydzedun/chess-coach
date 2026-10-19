@@ -1,18 +1,20 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //! Pointer capture for the board. Chess state changes only after a validated drop.
-use crate::{App, Message};
+use crate::{App, Message, theme};
 use chess_core::{Square, square_at};
 use iced::advanced::{
     Clipboard, Layout, Shell, Widget, layout, mouse, renderer, svg,
     widget::{Tree, tree},
 };
 use iced::{Element, Event, Length, Point, Rectangle, Size, Theme, touch};
+use renderer::Renderer as _;
 use svg::Renderer as _;
 
 pub(super) struct BoardInput<'a> {
     pub content: Element<'a, Message>,
     pub app: &'a App,
     pub cell: f32,
+    pub selected_destinations: Vec<Square>,
 }
 #[derive(Clone, Copy, Debug)]
 struct Press {
@@ -28,6 +30,7 @@ struct State {
     identity: Option<(u64, bool, u64, bool)>,
     finger: Option<touch::Finger>,
     position: Option<Point>,
+    preview_destinations: Vec<Square>,
 }
 fn square_under(bounds: Rectangle, cell: f32, point: Point, flipped: bool) -> Option<Square> {
     let x = point.x - bounds.x - 24.0;
@@ -159,6 +162,11 @@ impl Widget<Message, Theme, iced::Renderer> for BoardInput<'_> {
                         .game
                         .piece_at(square)
                         .is_some_and(|p| p.color == self.app.game.turn());
+                    state.preview_destinations = if draggable {
+                        self.app.game.destinations(square)
+                    } else {
+                        Vec::new()
+                    };
                     let bounds = layout.bounds();
                     state.press = Some(Press {
                         square,
@@ -179,11 +187,9 @@ impl Widget<Message, Theme, iced::Renderer> for BoardInput<'_> {
                             Size::new(self.cell * 0.9, self.cell * 0.9),
                         ),
                     });
-                    if draggable {
-                        // Prepare once on press. All motion, including crossing the
-                        // click threshold, stays local and only requests a redraw.
-                        shell.publish(Message::DragStarted(square));
-                    }
+                    // Selection, hints and the moving piece are painted from this
+                    // widget state. A press never rebuilds the application.
+                    shell.request_redraw();
                     shell.capture_event();
                 }
             }
@@ -202,11 +208,22 @@ impl Widget<Message, Theme, iced::Renderer> for BoardInput<'_> {
             Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)) => {
                 if let Some(press) = state.press.take() {
                     if press.dragging {
-                        shell.publish(Message::Dropped(press.square, square));
+                        shell.publish(Message::Dropped(
+                            press.square,
+                            square,
+                            (self.app.game.revision(), self.app.pointer_epoch),
+                        ));
                     } else if square == Some(press.square) {
-                        shell.publish(Message::ClickReleased(press.square));
+                        shell.publish(Message::BoardClick(
+                            press.square,
+                            (self.app.game.revision(), self.app.pointer_epoch),
+                        ));
                     } else if press.draggable {
-                        shell.publish(Message::Dropped(press.square, None));
+                        shell.publish(Message::Dropped(
+                            press.square,
+                            None,
+                            (self.app.game.revision(), self.app.pointer_epoch),
+                        ));
                     }
                     shell.request_redraw();
                     shell.capture_event();
@@ -216,8 +233,7 @@ impl Widget<Message, Theme, iced::Renderer> for BoardInput<'_> {
             | Event::Mouse(mouse::Event::CursorLeft) => {
                 state.finger = None;
                 state.position = None;
-                if state.press.take().is_some_and(|p| p.draggable) {
-                    shell.publish(Message::Cancel);
+                if state.press.take().is_some() {
                     shell.request_redraw();
                 }
             }
@@ -272,6 +288,111 @@ impl Widget<Message, Theme, iced::Renderer> for BoardInput<'_> {
             cursor,
             viewport,
         );
+        let state = tree.state.downcast_ref::<State>();
+        let moving = state.press.filter(|p| p.draggable);
+        let selected = moving.map(|p| p.square).or(self.app.selected);
+        let legal = if moving.is_some() {
+            &state.preview_destinations
+        } else {
+            &self.selected_destinations
+        };
+        let (light, dark) = self.app.appearance.active_palette().colors();
+        let in_check = self.app.game.in_check();
+        let bounds = layout.bounds();
+        for r in 0..8 {
+            for c in 0..8 {
+                let square = square_at(r, c, self.app.flipped).expect("board coordinates");
+                let cell = Rectangle::new(
+                    Point::new(
+                        bounds.x + 24.0 + c as f32 * self.cell,
+                        bounds.y + r as f32 * self.cell,
+                    ),
+                    Size::new(self.cell, self.cell),
+                );
+                let mut background = if (r + c) % 2 == 0 { light } else { dark };
+                if self
+                    .app
+                    .game
+                    .last_move()
+                    .is_some_and(|m| m.from == square || m.to == square)
+                {
+                    background = theme::LAST;
+                }
+                if selected == Some(square) {
+                    background = theme::SELECTED;
+                }
+                let piece = self.app.game.piece_at(square);
+                let is_legal = legal.contains(&square);
+                if is_legal && piece.is_some() {
+                    background = theme::tint(background, theme::INK, 0.20);
+                }
+                if in_check
+                    && piece.is_some_and(|p| {
+                        p.color == self.app.game.turn() && p.role == chess_core::Role::King
+                    })
+                {
+                    background = theme::tint(background, iced::Color::from_rgb8(220, 55, 55), 0.65);
+                }
+                renderer.fill_quad(
+                    renderer::Quad {
+                        bounds: cell,
+                        ..Default::default()
+                    },
+                    background,
+                );
+                // Keep a fixed marker slot per square. Inserting/removing dots
+                // shifts the software renderer's primitive list and invalidates
+                // unrelated squares and UI, making first selection expensive.
+                {
+                    renderer.fill_quad(
+                        renderer::Quad {
+                            bounds: Rectangle::new(
+                                Point::new(cell.x + self.cell * 0.4, cell.y + self.cell * 0.4),
+                                Size::new(self.cell * 0.2, self.cell * 0.2),
+                            ),
+                            border: iced::Border {
+                                radius: (self.cell * 0.1).into(),
+                                ..Default::default()
+                            },
+                            ..Default::default()
+                        },
+                        iced::Color {
+                            a: if is_legal && piece.is_none() {
+                                0.24
+                            } else {
+                                0.0
+                            },
+                            ..theme::INK
+                        },
+                    );
+                }
+                if let Some(piece) = piece {
+                    renderer.draw_svg(
+                        svg::Svg {
+                            handle: svg::Handle::from_memory(
+                                self.app
+                                    .appearance
+                                    .piece_set
+                                    .svg_bytes(piece.color, piece.role),
+                            ),
+                            color: None,
+                            rotation: iced::Radians(0.0),
+                            // Retain the source slot; the preview draws above it.
+                            opacity: if moving.is_some_and(|p| p.square == square) {
+                                0.0
+                            } else {
+                                1.0
+                            },
+                        },
+                        Rectangle::new(
+                            Point::new(cell.x + self.cell * 0.05, cell.y + self.cell * 0.05),
+                            Size::new(self.cell * 0.9, self.cell * 0.9),
+                        ),
+                        *viewport,
+                    );
+                }
+            }
+        }
         let Some(press) = tree
             .state
             .downcast_ref::<State>()
@@ -312,6 +433,7 @@ mod tests {
         tree: Tree,
         renderer: iced::Renderer,
         node: layout::Node,
+        redraw_requested: bool,
     }
     impl<'a> Harness<'a> {
         fn new(app: &'a App) -> Self {
@@ -319,6 +441,10 @@ mod tests {
                 content: iced::widget::Space::new().width(424).height(424).into(),
                 app,
                 cell: 50.0,
+                selected_destinations: app
+                    .selected
+                    .map(|s| app.game.destinations(s))
+                    .unwrap_or_default(),
             };
             let tree = Tree::new(&widget as &dyn Widget<Message, Theme, iced::Renderer>);
             Self {
@@ -326,10 +452,12 @@ mod tests {
                 tree,
                 renderer: iced::Renderer::new(iced::Font::default(), iced::Pixels(16.0)),
                 node: layout::Node::new(Size::new(424.0, 424.0)),
+                redraw_requested: false,
             }
         }
         fn event(&mut self, event: Event, point: Point) -> Vec<Message> {
             let mut messages = Vec::new();
+            let mut shell = Shell::new(&mut messages);
             self.widget.update(
                 &mut self.tree,
                 &event,
@@ -337,9 +465,11 @@ mod tests {
                 mouse::Cursor::Available(point),
                 &self.renderer,
                 &mut iced::advanced::clipboard::Null,
-                &mut Shell::new(&mut messages),
+                &mut shell,
                 &Rectangle::with_size(Size::new(1000.0, 1000.0)),
             );
+            self.redraw_requested =
+                shell.redraw_request() == iced::window::RedrawRequest::NextFrame;
             messages
         }
         fn press(&mut self, point: Point) {
@@ -351,9 +481,7 @@ mod tests {
                 Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)),
                 point,
             );
-            assert!(
-                messages.is_empty() || matches!(messages.as_slice(), [Message::DragStarted(_)])
-            );
+            assert!(messages.is_empty());
         }
         fn release(&mut self, point: Point) -> Vec<Message> {
             self.event(
@@ -364,6 +492,106 @@ mod tests {
                 Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)),
                 point,
             )
+        }
+    }
+    #[test]
+    fn first_selection_preserves_stationary_render_slots() {
+        let app = App::default();
+        let mut h = Harness::new(&app);
+        let viewport = Rectangle::with_size(Size::new(1000.0, 1000.0));
+        let theme = crate::theme::theme(&app);
+        let style = renderer::Style {
+            text_color: crate::theme::INK,
+        };
+        h.widget.draw(
+            &h.tree,
+            &mut h.renderer,
+            &theme,
+            &style,
+            Layout::new(&h.node),
+            mouse::Cursor::Unavailable,
+            &viewport,
+        );
+        let idle = h.renderer.layers().to_vec();
+        h.renderer.reset(viewport);
+        h.press(Point::new(249.0, 325.0));
+        let point = Point::new(250.0, 325.0);
+        h.event(
+            Event::Mouse(mouse::Event::CursorMoved { position: point }),
+            point,
+        );
+        h.widget.draw(
+            &h.tree,
+            &mut h.renderer,
+            &theme,
+            &style,
+            Layout::new(&h.node),
+            mouse::Cursor::Available(point),
+            &viewport,
+        );
+        let pressed = h.renderer.layers();
+        assert_eq!(idle.len(), pressed.len());
+        let before = &idle[0];
+        let after = &pressed[0];
+        assert_eq!(before.quads.len(), after.quads.len());
+        let changed: Vec<_> = before
+            .quads
+            .iter()
+            .zip(&after.quads)
+            .filter(|(a, b)| a != b)
+            .collect();
+        assert_eq!(
+            changed.len(),
+            3,
+            "Only the source square and e3/e4 hints should change"
+        );
+        assert_eq!(
+            before.images.len() + 1,
+            after.images.len(),
+            "Only the moving preview is appended"
+        );
+        assert_eq!(
+            before
+                .images
+                .iter()
+                .zip(&after.images)
+                .filter(|(a, b)| a != b)
+                .count(),
+            1,
+            "Stationary pieces must retain their render slots"
+        );
+    }
+    #[test]
+    fn first_unselected_press_and_motion_only_request_redraws() {
+        for selected in [None, Some(Square::E2)] {
+            let app = App {
+                selected,
+                ..App::default()
+            };
+            let initial = app.game.fen();
+            let mut h = Harness::new(&app);
+            let e2 = Point::new(249.0, 325.0);
+            h.press(e2);
+            assert!(h.redraw_requested);
+            assert_eq!(app.selected, selected);
+            assert_eq!(app.game.fen(), initial);
+            assert!(
+                h.tree
+                    .state
+                    .downcast_ref::<State>()
+                    .preview_destinations
+                    .contains(&Square::E4)
+            );
+            let position = Point::new(e2.x + 1.0, e2.y);
+            assert!(
+                h.event(
+                    Event::Mouse(mouse::Event::CursorMoved { position }),
+                    position
+                )
+                .is_empty()
+            );
+            assert!(h.redraw_requested);
+            assert_eq!(app.selected, selected);
         }
     }
     #[test]
@@ -400,14 +628,13 @@ mod tests {
         let e2 = Point::new(249.0, 325.0);
         let e4 = Point::new(249.0, 225.0);
         h.event(Event::Mouse(mouse::Event::CursorMoved { position: e2 }), e4);
-        assert!(matches!(
+        assert!(
             h.event(
                 Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)),
                 e4
             )
-            .as_slice(),
-            [Message::DragStarted(Square::E2)]
-        ));
+            .is_empty()
+        );
         assert_eq!(
             h.tree.state.downcast_ref::<State>().press.unwrap().origin,
             e2
@@ -426,7 +653,7 @@ mod tests {
                 e2
             )
             .as_slice(),
-            [Message::Dropped(Square::E2, Some(Square::E4))]
+            [Message::Dropped(Square::E2, Some(Square::E4), _)]
         ));
     }
     #[test]
@@ -458,7 +685,6 @@ mod tests {
                 let _ = app.update(message);
             }
             assert!(app.selected.is_none());
-            assert!(app.dragged.is_none());
             assert_eq!(app.game.ply(), usize::from(destinations[1] == Square::E4));
         }
     }
@@ -494,7 +720,7 @@ mod tests {
                 e4
             )
             .as_slice(),
-            [Message::ClickReleased(Square::E4)]
+            [Message::BoardClick(Square::E4, _)]
         ));
     }
     #[test]
@@ -515,7 +741,7 @@ mod tests {
         );
         assert!(matches!(
             h.release(e2).as_slice(),
-            [Message::ClickReleased(Square::E2)]
+            [Message::BoardClick(Square::E2, _)]
         ));
         h.press(e2);
         assert!(
@@ -524,7 +750,7 @@ mod tests {
         );
         assert!(matches!(
             h.release(e4).as_slice(),
-            [Message::Dropped(Square::E2, Some(Square::E4))]
+            [Message::Dropped(Square::E2, Some(Square::E4), _)]
         ));
         assert!(h.release(e4).is_empty());
     }
@@ -541,18 +767,17 @@ mod tests {
         );
         assert!(matches!(
             h.release(outside).as_slice(),
-            [Message::Dropped(Square::E2, None)]
+            [Message::Dropped(Square::E2, None, _)]
         ));
         h.press(e2);
         h.event(
             Event::Mouse(mouse::Event::CursorMoved { position: outside }),
             outside,
         );
-        assert!(matches!(
+        assert!(
             h.event(Event::Window(iced::window::Event::Unfocused), outside)
-                .as_slice(),
-            [Message::Cancel]
-        ));
+                .is_empty()
+        );
         assert!(h.release(e2).is_empty());
         let e7 = Point::new(249.0, 75.0);
         h.press(e7);
@@ -602,7 +827,7 @@ mod tests {
                 Point::ORIGIN
             )
             .as_slice(),
-            [Message::ClickReleased(Square::E2)]
+            [Message::BoardClick(Square::E2, _)]
         ));
         h.event(
             Event::Touch(touch::Event::FingerPressed { id, position: e2 }),
@@ -631,7 +856,7 @@ mod tests {
                 Point::ORIGIN
             )
             .as_slice(),
-            [Message::Dropped(Square::E2, Some(Square::E4))]
+            [Message::Dropped(Square::E2, Some(Square::E4), _)]
         ));
         h.event(
             Event::Touch(touch::Event::FingerPressed { id, position: e2 }),
@@ -641,14 +866,14 @@ mod tests {
             Event::Touch(touch::Event::FingerMoved { id, position: e4 }),
             Point::ORIGIN,
         );
-        assert!(matches!(
+        assert!(
             h.event(
                 Event::Touch(touch::Event::FingerLost { id, position: e4 }),
                 Point::ORIGIN
             )
-            .as_slice(),
-            [Message::Cancel]
-        ));
+            .is_empty()
+        );
+        assert!(h.tree.state.downcast_ref::<State>().press.is_none());
     }
     #[test]
     fn focus_loss_releases_touch_ownership_before_mouse_input() {
@@ -667,7 +892,7 @@ mod tests {
             h.press(e2);
             assert!(matches!(
                 h.release(e2).as_slice(),
-                [Message::ClickReleased(Square::E2)]
+                [Message::BoardClick(Square::E2, _)]
             ));
         }
     }

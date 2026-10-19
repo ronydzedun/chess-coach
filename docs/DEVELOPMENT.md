@@ -59,3 +59,9 @@ The current review scope does not include variation review or editing, comment d
 ## Platform status
 
 The app has been launched on Debian 13 under native Wayland with Hyprland, and a mouse-driven `e2` to `e4` move was exercised. Full-workspace `cargo check --all-targets` passed for Windows GNU and macOS Darwin targets. CI checks native builds, tests, Clippy and formatting on the Linux, Windows and macOS runners; consult the [current CI results](https://github.com/ronydzedun/chess-coach/actions/workflows/ci.yml) for the revision being tested. Graphical runtime on Windows/macOS remains unverified.
+
+## GUI responsiveness checks
+
+The dev profile optimizes `tiny-skia`, `tiny-skia-path` and `iced_tiny_skia` at level 2. Their unoptimized software rasterization can make selection highlights noticeably slower than subsequent pointer motion. Application crates remain unoptimized for fast iteration and debugging; debug assertions and overflow checks retain their normal defaults. Changing these overrides may recompile renderer dependencies. For distribution builds use `cargo build --release --workspace --locked`.
+
+When checking drag responsiveness, start from an unselected piece and press/move immediately, without a settling delay after mouse-down. Compare with the same piece already selected. Verify grab offsets, selection hints, clicks/double clicks, capture, promotion, outside drops, Escape, flip and resize, both with analysis enabled and without an installed engine. Automated widget tests cover redraw-only press/motion and render-slot stability, but do not establish native display latency; record the display backend used for manual measurements.
