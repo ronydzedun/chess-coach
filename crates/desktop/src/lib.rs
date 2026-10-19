@@ -1,4 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+pub mod appearance;
+mod appearance_ui;
+mod evaluation;
 pub mod import;
 mod review;
 pub mod theme;
@@ -28,8 +31,14 @@ pub enum PanelTab {
     #[default]
     Analysis,
     Moves,
+    Appearance,
 }
 pub struct App {
+    appearance: appearance::Settings,
+    palette_name: String,
+    palette_light: String,
+    palette_dark: String,
+    appearance_status: String,
     review: review::Review,
     panel_tab: PanelTab,
     game: Game,
@@ -46,6 +55,8 @@ pub struct App {
     next_request: u64,
     active: Option<(u64, u64)>,
     analyzing: bool,
+    auto_analysis: bool,
+    analysis_due: Option<std::time::Instant>,
     info: engine::Info,
     best_move: Option<String>,
 }
@@ -62,7 +73,19 @@ impl Default for App {
             "Engine found. Ready to analyze."
         }
         .into();
+        let (appearance, appearance_status) = match appearance::Settings::load() {
+            Ok(settings) => (settings, String::new()),
+            Err(error) => (
+                appearance::Settings::default(),
+                format!("Using default appearance. {error}"),
+            ),
+        };
         Self {
+            appearance,
+            palette_name: String::new(),
+            palette_light: "#F0D9B5".into(),
+            palette_dark: "#B58863".into(),
+            appearance_status,
             review: review::Review::default(),
             panel_tab: PanelTab::Analysis,
             engine: engine::Engine::new(),
@@ -73,6 +96,8 @@ impl Default for App {
             next_request: 0,
             active: None,
             analyzing: false,
+            auto_analysis: true,
+            analysis_due: Some(std::time::Instant::now()),
             info: engine::Info::default(),
             best_move: None,
             game,
@@ -100,11 +125,19 @@ pub enum Message {
     SearchMode(SearchMode),
     SearchLimit(String),
     Analyze,
+    ToggleAnalysis,
     Stop,
     Poll,
     Key(keyboard::Event),
     Seek(usize),
     Panel(PanelTab),
+    PieceSet(appearance::PieceSet),
+    Palette(String),
+    PaletteName(String),
+    PaletteLight(String),
+    PaletteDark(String),
+    SavePalette,
+    DeletePalette,
     OpenImport,
     CancelImport,
     OpenPgnFile,
@@ -128,14 +161,27 @@ impl App {
         self.promotion = None;
         self.fen_input = self.game.fen();
         self.notice = "Position updated".into();
+        self.schedule_analysis();
+    }
+    fn schedule_analysis(&mut self) {
+        self.stop_analysis();
+        if self.auto_analysis {
+            self.analysis_due =
+                Some(std::time::Instant::now() + std::time::Duration::from_millis(300));
+        }
     }
     fn stop_analysis(&mut self) {
+        self.analysis_due = None;
         self.engine.stop();
         self.active = None;
         self.analyzing = false;
         self.engine_status = "Analysis stopped".into();
     }
     fn start_analysis(&mut self) {
+        self.analysis_due = None;
+        if !self.auto_analysis {
+            return;
+        }
         let limit = match self.search_limit.parse::<u32>() {
             Ok(n) if self.search_mode == SearchMode::Time && (1..=300_000).contains(&n) => {
                 engine::Limit::TimeMs(n)
@@ -217,6 +263,13 @@ impl App {
     pub fn update(&mut self, message: Message) -> Task<Message> {
         match message {
             Message::Panel(tab) => self.panel_tab = tab,
+            Message::PieceSet(_)
+            | Message::Palette(_)
+            | Message::PaletteName(_)
+            | Message::PaletteLight(_)
+            | Message::PaletteDark(_)
+            | Message::SavePalette
+            | Message::DeletePalette => return self.update_appearance(message),
             Message::OpenImport
             | Message::CancelImport
             | Message::OpenPgnFile
@@ -290,6 +343,9 @@ impl App {
             Message::EnginePath(path) => {
                 self.stop_analysis();
                 self.engine_path = path;
+                self.info = engine::Info::default();
+                self.best_move = None;
+                self.schedule_analysis();
             }
             Message::SearchMode(mode) => {
                 self.search_mode = mode;
@@ -298,11 +354,28 @@ impl App {
                     SearchMode::Depth => "18",
                 }
                 .into();
+                self.schedule_analysis();
             }
-            Message::SearchLimit(limit) => self.search_limit = limit,
+            Message::SearchLimit(limit) => {
+                self.search_limit = limit;
+                self.schedule_analysis();
+            }
             Message::Analyze => self.start_analysis(),
-            Message::Stop => self.stop_analysis(),
+            Message::ToggleAnalysis => {
+                self.auto_analysis = !self.auto_analysis;
+                self.schedule_analysis();
+            }
+            Message::Stop => {
+                self.auto_analysis = false;
+                self.stop_analysis();
+            }
             Message::Poll => {
+                if self
+                    .analysis_due
+                    .is_some_and(|due| std::time::Instant::now() >= due)
+                {
+                    self.start_analysis();
+                }
                 while let Some(event) = self.engine.try_recv() {
                     self.receive(event);
                 }
@@ -349,7 +422,9 @@ impl App {
         Task::none()
     }
     fn board(&self, side: f32) -> Element<'_, Message> {
+        let side = side - 48.0;
         let cell = (side - 24.0) / 8.0;
+        let (light, dark) = self.appearance.active_palette().colors();
         let legal = self
             .selected
             .map(|s| self.game.destinations(s))
@@ -363,11 +438,7 @@ impl App {
                 .push(container(text(rank.to_string()).size(11).color(theme::MUTED)).width(24));
             for c in 0..8 {
                 let square = square_at(r, c, self.flipped).expect("board coordinates");
-                let mut background = if (r + c) % 2 == 0 {
-                    theme::LIGHT
-                } else {
-                    theme::DARK
-                };
+                let mut background = if (r + c) % 2 == 0 { light } else { dark };
                 if self
                     .game
                     .last_move()
@@ -379,17 +450,24 @@ impl App {
                     background = theme::SELECTED;
                 }
                 let is_legal = legal.contains(&square);
-                let glyph = self
-                    .game
-                    .piece_at(square)
-                    .map(|p| piece_glyph(p.color, p.role))
-                    .unwrap_or(if is_legal { "·" } else { "" });
                 let checked = self.game.in_check()
                     && self
                         .game
                         .piece_at(square)
                         .is_some_and(|p| p.color == self.game.turn() && p.role == Role::King);
-                let content = container(text(glyph).size(cell * 0.70).color(theme::INK))
+                let piece: Element<'_, Message> = match self.game.piece_at(square) {
+                    Some(p) => iced::widget::svg(iced::widget::svg::Handle::from_memory(
+                        self.appearance.piece_set.svg_bytes(p.color, p.role),
+                    ))
+                    .width(cell * 0.9)
+                    .height(cell * 0.9)
+                    .into(),
+                    None => text(if is_legal { "•" } else { "" })
+                        .size(cell * 0.30)
+                        .color(theme::INK)
+                        .into(),
+                };
+                let content = container(piece)
                     .center_x(Length::Fill)
                     .center_y(Length::Fill);
                 line = line.push(
@@ -436,7 +514,12 @@ impl App {
                 .center_x(cell),
             );
         }
-        board.push(files).into()
+        row![
+            evaluation::view(self.info.score, self.game.turn(), self.flipped, cell * 8.0),
+            board.push(files)
+        ]
+        .spacing(8)
+        .into()
     }
     fn move_list(&self) -> Element<'_, Message> {
         let mut history = Column::new().spacing(7);
@@ -518,11 +601,12 @@ impl App {
                     .size(13)
             ]
             .spacing(6),
-            row![
-                button("Analyze").on_press(Message::Analyze),
-                button("Stop").on_press_maybe(self.analyzing.then_some(Message::Stop))
-            ]
-            .spacing(8),
+            button(if self.auto_analysis {
+                "Analysis: ON"
+            } else {
+                "Analysis: OFF"
+            })
+            .on_press(Message::ToggleAnalysis),
             text(&self.engine_status).size(12).color(theme::MUTED),
             row![
                 text(score).size(32),
@@ -546,6 +630,8 @@ impl App {
     }
     fn panel(&self) -> Element<'_, Message> {
         let analysis = self.panel_tab == PanelTab::Analysis;
+        let moves = self.panel_tab == PanelTab::Moves;
+        let appearance = self.panel_tab == PanelTab::Appearance;
         let tabs = row![
             button("Analysis")
                 .on_press(Message::Panel(PanelTab::Analysis))
@@ -556,14 +642,24 @@ impl App {
                 }),
             button("Moves")
                 .on_press(Message::Panel(PanelTab::Moves))
-                .style(move |theme, status| if !analysis {
+                .style(move |theme, status| if moves {
+                    button::primary(theme, status)
+                } else {
+                    button::text(theme, status)
+                }),
+            button("Style")
+                .on_press(Message::Panel(PanelTab::Appearance))
+                .style(move |theme, status| if appearance {
                     button::primary(theme, status)
                 } else {
                     button::text(theme, status)
                 }),
         ]
         .spacing(8);
-        let mut panel = column![tabs, self.review_controls()].spacing(12);
+        let mut panel = column![tabs].spacing(12);
+        if !appearance {
+            panel = panel.push(self.review_controls());
+        }
         if self.promotion.is_some() {
             panel = panel
                 .push(text("Choose promotion").color(theme::ACCENT))
@@ -586,10 +682,16 @@ impl App {
         panel = panel.push(match self.panel_tab {
             PanelTab::Analysis => self.engine_controls(),
             PanelTab::Moves => self.move_list(),
+            PanelTab::Appearance => self.appearance_controls(),
         });
-        scrollable(container(panel).padding(16).width(Length::Fill))
-            .height(Length::Fill)
-            .into()
+        scrollable(
+            container(panel)
+                .padding(16)
+                .width(Length::Fill)
+                .style(container::rounded_box),
+        )
+        .height(Length::Fill)
+        .into()
     }
     pub fn view(&self) -> Element<'_, Message> {
         if self.review.import_open {
@@ -611,10 +713,11 @@ impl App {
         ]
         .align_y(Alignment::Center);
         let toolbar = row![
-            button("New game").on_press(Message::New),
+            button("New").on_press(Message::New),
             button("Undo").on_press(Message::Undo),
-            button("Flip board").on_press(Message::Flip),
-            button("Import PGN").on_press(Message::OpenImport)
+            button("Flip").on_press(Message::Flip),
+            button("Import PGN").on_press(Message::OpenImport),
+            button("Appearance").on_press(Message::Panel(PanelTab::Appearance))
         ]
         .spacing(8);
         let fen = row![
@@ -657,7 +760,13 @@ impl App {
                 toolbar,
                 fen,
                 body,
-                text(&self.notice).size(12).color(theme::MUTED)
+                text(if self.appearance_status.starts_with("Using default") {
+                    format!("{} · {}", self.notice, self.appearance_status)
+                } else {
+                    self.notice.clone()
+                })
+                .size(12)
+                .color(theme::MUTED)
             ]
             .spacing(16),
         )
@@ -665,22 +774,6 @@ impl App {
         .width(Length::Fill)
         .height(Length::Fill)
         .into()
-    }
-}
-fn piece_glyph(color: Color, role: Role) -> &'static str {
-    match (color, role) {
-        (Color::White, Role::King) => "♔",
-        (Color::White, Role::Queen) => "♕",
-        (Color::White, Role::Rook) => "♖",
-        (Color::White, Role::Bishop) => "♗",
-        (Color::White, Role::Knight) => "♘",
-        (Color::White, Role::Pawn) => "♙",
-        (Color::Black, Role::King) => "♚",
-        (Color::Black, Role::Queen) => "♛",
-        (Color::Black, Role::Rook) => "♜",
-        (Color::Black, Role::Bishop) => "♝",
-        (Color::Black, Role::Knight) => "♞",
-        (Color::Black, Role::Pawn) => "♟",
     }
 }
 #[cfg(test)]
@@ -768,6 +861,41 @@ mod tests {
         send(&mut app, Message::Analyze);
         assert_eq!(app.game.fen(), fen);
         assert!(!app.analyzing);
+    }
+    #[test]
+    fn automatic_analysis_is_scheduled_and_toggle_cancels_it() {
+        let mut app = App::default();
+        assert!(app.auto_analysis);
+        assert!(app.analysis_due.is_some());
+        send(&mut app, Message::ToggleAnalysis);
+        assert!(!app.auto_analysis);
+        assert!(app.analysis_due.is_none());
+        send(&mut app, Message::Analyze);
+        assert!(!app.analyzing);
+        assert!(app.active.is_none());
+        send(&mut app, Message::Square(Square::E2));
+        send(&mut app, Message::Square(Square::E4));
+        assert!(app.analysis_due.is_none());
+        send(&mut app, Message::ToggleAnalysis);
+        assert!(app.analysis_due.is_some());
+        app.active = Some((7, app.game.revision()));
+        app.info.score = Some(engine::Score::Cp(50));
+        send(&mut app, Message::Undo);
+        assert!(app.active.is_none());
+        assert!(app.info.score.is_none());
+        assert!(app.analysis_due.is_some());
+    }
+    #[test]
+    fn automatic_analysis_failure_does_not_retry_every_poll() {
+        let mut app = App::default();
+        app.engine_path.clear();
+        app.analysis_due = Some(std::time::Instant::now());
+        send(&mut app, Message::Poll);
+        assert!(app.analysis_due.is_none());
+        assert!(!app.analyzing);
+        let requests = app.next_request;
+        send(&mut app, Message::Poll);
+        assert_eq!(app.next_request, requests);
     }
     #[test]
     fn promotion_waits_for_choice() {

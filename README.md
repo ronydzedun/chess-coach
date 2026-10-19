@@ -17,7 +17,7 @@ Running application: local Stockfish analysis on Debian 13 (X11/Xvfb).
 
 Import PGN by pasting text or opening a `.pgn` file. Imports are parsed in a background worker and accepted atomically: if any game is invalid, the import is rejected and the current board is preserved. Limits are 8 MiB per import, 256 games, 2,048 plies per game, and 50,000 plies total. Imported games are retained only in memory. The original source is never modified. PGN export, saved games, and cloud or AI services are not included.
 
-For local analysis, install Stockfish (or another UCI-compatible engine) separately and choose its executable in the app. The app can also use `STOCKFISH_EXECUTABLE`, search `PATH`, and check `/usr/games/stockfish` for Stockfish. Choose a time limit in milliseconds or a search depth; displayed centipawn and mate scores use White's perspective, and the principal variation uses UCI coordinate notation. The engine is never bundled.
+For local analysis, install Stockfish (or another UCI-compatible engine) separately. The app can use `STOCKFISH_EXECUTABLE`, search `PATH`, and check `/usr/games/stockfish`; the engine is never bundled. Analysis starts automatically at launch and 300 ms after a position, FEN, import, or review-navigation change. One **Analysis: ON/OFF** toggle controls automatic analysis for this session; it defaults to ON at each launch. Set a bounded time limit (1–300000 ms, default 1000) or depth (1–128); depth searches have a 60-second safety deadline. Changing the engine path or limits cancels and restarts automatic analysis when enabled. Errors do not trigger automatic retry loops. Scores use White's perspective, and the principal variation uses UCI coordinate notation. A vertical bar beside the board shows a bounded centipawn balance, not win probability; unknown scores are neutral and mate scores are saturated, with M0 identifying the winner.
 
 ![Chess Coach PGN review](assets/screenshots/review-linux.png)
 
@@ -42,13 +42,15 @@ On Debian/Hyprland, the native file picker needs a file-chooser portal backend o
 
 The app uses the `iced` 0.14 UI toolkit with its `tiny-skia` software renderer and native Wayland/X11 backends. It does not use a Vulkan or `wgpu` renderer.
 
-After import, the **Moves** tab shows the complete line and highlights the current move. The **Analysis** tab analyzes the selected position. Switching tabs preserves the position and any running analysis.
+After import, the **Moves** tab shows the complete line and highlights the current move. Switching tabs preserves the position and any running analysis. The **Appearance** toolbar button opens controls for three bundled SVG piece sets (Merida, Celtic, RhosGFX), four board palettes, and custom palettes with a name and light/dark `#RRGGBB` colors. Appearance choices are saved in `appearance.json` under the user configuration directory.
+
+![Chess Coach appearance](assets/screenshots/appearance-linux.png)
 
 ## Stockfish and controls
 
 On Debian, install the separate engine with `sudo apt install stockfish`. It normally lives at `/usr/games/stockfish`. For other systems, obtain a compatible executable from [Stockfish upstream](https://stockfishchess.org/download/) and enter its full path in the side panel, or set `STOCKFISH_EXECUTABLE` before launching. Paths containing spaces are supported; shell expansions such as `~` are not performed. A missing engine does not prevent using the board or FEN.
 
-Choose **Time (ms)** (1–300000) or **Depth** (1–128), then **Analyze**. **Stop** cancels the search; changing position also cancels it and clears the old evaluation. Depth searches have a 60-second safety deadline. Positive scores favor White, negative scores favor Black. `M+3` means White can mate in three moves; `M-3` means Black can mate in three. `M0` identifies the winner in an already mated position. The best move and principal variation are UCI coordinates, not SAN.
+Automatic analysis runs by default after launch and relevant position changes. Use the single **Analysis: ON/OFF** toggle to control it for the current session. Changing position cancels the old search and clears its evaluation. Depth searches have a 60-second safety deadline. Positive scores favor White, negative scores favor Black. `M+3` means White can mate in three moves; `M-3` means Black can mate in three. `M0` identifies the winner in an already mated position. The best move and principal variation are UCI coordinates, not SAN.
 
 Click a piece, then its destination. Ctrl/Cmd+O opens PGN import, Ctrl/Cmd+N starts a new game, Ctrl/Cmd+Z undoes, Ctrl/Cmd+F flips; Escape cancels a selection or promotion. FEN can be submitted with Enter. No network service, account, telemetry or external API is required.
 
@@ -65,7 +67,7 @@ Ordinary tests do not require an engine. Run real-engine checks with `STOCKFISH_
 
 Debian 13 with Hyprland has been exercised under native Wayland; the X11 UI has also been exercised in Xvfb. Full-workspace cross-target `cargo check` passes for Windows GNU and macOS Darwin. CI checks native builds, tests, Clippy and formatting on Linux, Windows and macOS; see the [current CI results](https://github.com/ronydzedun/chess-coach/actions/workflows/ci.yml) for the revision you are using. Graphical runtime on Windows/macOS remains unverified.
 
-PGN review supports standard-chess main lines, SAN validation, UTF-8 text, BOM, comments, NAGs, `SetUp`/`FEN` positions, and multiple games per import. It rejects malformed or illegal moves, unsupported variants, invalid FEN, and games without a result. Variations can’t be reviewed or edited; comments aren’t displayed. There is no PGN export, persistence, graph, training, or AI coach yet. Other prototype limits include click-to-move, a single analysis PV, and no automatic engine opponent or repetition/fifty-move claim UI. The move list starts fresh after FEN loading. Unicode pieces use the bundled, licensed DejaVu Sans font; Windows/macOS font rendering is not yet verified.
+PGN review supports standard-chess main lines, SAN validation, UTF-8 text, BOM, comments, NAGs, `SetUp`/`FEN` positions, and multiple games per import. It rejects malformed or illegal moves, unsupported variants, invalid FEN, and games without a result. Variations can’t be reviewed or edited; comments aren’t displayed. There is no PGN export, saved-game persistence, graph, training, or AI coach yet. Other prototype limits include click-to-move, a single analysis PV, and no automatic engine opponent or repetition/fifty-move claim UI. The move list starts fresh after FEN loading. The interface uses a bundled, licensed DejaVu Sans font. Board pieces are rendered from bundled SVG artwork; its artists and license terms are listed in [third-party notices](THIRD_PARTY_NOTICES.md).
 
 ## Workspace
 

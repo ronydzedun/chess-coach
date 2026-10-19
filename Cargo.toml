@@ -10,4 +10,4 @@ license = "GPL-3.0-or-later"
 
 [workspace.dependencies]
 shakmaty = "0.30.2"
-iced = { version = "0.14.0", default-features = false, features = ["tiny-skia", "tokio", "x11", "wayland"] }
+iced = { version = "0.14.0", default-features = false, features = ["tiny-skia", "tokio", "x11", "wayland", "svg"] }
