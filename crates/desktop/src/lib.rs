@@ -199,6 +199,7 @@ impl App {
         ])
     }
     fn changed(&mut self) {
+        self.retain_game_search();
         self.board_motion = None;
         self.info = engine::Info::default();
         self.best_move = None;
@@ -210,7 +211,7 @@ impl App {
     }
     fn schedule_analysis(&mut self) {
         self.analysis_due = None;
-        if !self.auto_analysis || self.active.is_some() {
+        if !self.auto_analysis {
             self.stop_analysis();
         }
         if let Ok(key) = self.analysis_key()
@@ -221,10 +222,17 @@ impl App {
         {
             self.stop_analysis();
         }
+        if self.active.is_some() {
+            self.stop_analysis();
+        }
         if self.restore_cached_analysis() {
             return;
         }
-        self.stop_analysis();
+        if self.background.is_none() {
+            self.stop_analysis();
+        } else {
+            self.engine_status = "Waiting for the current game search to finish…".into();
+        }
         if self.auto_analysis {
             self.analysis_due =
                 Some(std::time::Instant::now() + std::time::Duration::from_millis(300));
@@ -612,9 +620,10 @@ impl App {
                 self.stop_analysis();
             }
             Message::Poll => {
-                if self
-                    .analysis_due
-                    .is_some_and(|due| std::time::Instant::now() >= due)
+                if self.background.is_none()
+                    && self
+                        .analysis_due
+                        .is_some_and(|due| std::time::Instant::now() >= due)
                 {
                     self.start_analysis(true);
                 }

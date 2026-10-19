@@ -122,6 +122,27 @@ impl GameAnalysis {
     }
 }
 impl App {
+    // Navigation must not throw away a search that belongs to the imported game.
+    // Its result is routed by FEN, independently of the currently displayed revision.
+    pub(super) fn retain_game_search(&mut self) {
+        let retain = self.auto_analysis
+            && self.active_key.as_ref().is_some_and(|key| {
+                self.game_analysis
+                    .as_ref()
+                    .is_some_and(|batch| same_configuration(&batch.configuration, key))
+            });
+        if retain {
+            let (id, _) = self.active.take().expect("active search key");
+            self.background = Some(Background {
+                id,
+                key: self.active_key.take().unwrap(),
+                info: self.info.clone(),
+            });
+            self.analyzing = false;
+        } else if self.active.is_some() {
+            self.stop_analysis();
+        }
+    }
     pub(super) fn begin_game_analysis(&mut self) {
         // Import validation bounds this storage to 2049 positions in one selected game.
         let configuration = Key {
@@ -334,30 +355,78 @@ mod tests {
         assert!(app.analysis_due.is_none());
     }
     #[test]
-    fn foreground_has_priority_and_old_background_events_cannot_contaminate_it() {
+    fn navigation_finishes_inflight_search_then_prioritizes_the_open_position() {
         let mut app = app();
         complete_current(&mut app, 35);
         app.start_background_analysis();
-        let old = app.background.as_ref().unwrap().id;
-        send(&mut app, Message::Seek(3));
-        assert!(app.background.is_none());
-        assert!(app.analysis_due.is_some());
-        app.start_background_analysis();
-        assert!(app.background.is_none());
-        app.receive(engine::Event::BestMove {
-            id: old,
-            best_move: Some("a2a4".into()),
+        let id = app.background.as_ref().unwrap().id;
+        for ply in [3, 2, 0, 1, 3] {
+            send(&mut app, Message::Seek(ply));
+            assert_eq!(app.background.as_ref().unwrap().id, id);
+            app.analysis_due = Some(std::time::Instant::now());
+            send(&mut app, Message::Poll);
+            assert_eq!(app.background.as_ref().unwrap().id, id);
+        }
+        let key = finish_background(&mut app, -40);
+        assert!(app.game_analysis.as_ref().unwrap().get(&key).is_some());
+        assert!(app.info.score.is_none()); // This is a different position.
+        send(&mut app, Message::Poll);
+        assert_eq!(app.active_key.as_ref().unwrap().fen, app.game.fen());
+        let foreground = app.active.unwrap().0;
+        app.receive(engine::Event::Info {
+            id: foreground,
+            info: engine::Info {
+                score: Some(engine::Score::Cp(70)),
+                ..Default::default()
+            },
         });
-        assert!(app.info.score.is_none());
-        app.analysis_due = None;
-        complete_current(&mut app, 70);
-        app.start_background_analysis();
-        assert_ne!(app.background.as_ref().unwrap().id, old);
-        assert!(app.background.as_ref().unwrap().key.fen.contains(" b "));
-        let active = app.background.as_ref().unwrap().id;
-        send(&mut app, Message::Seek(0)); // Cached navigation leaves background search running.
-        assert_eq!(app.background.as_ref().unwrap().id, active);
+        send(&mut app, Message::Seek(0));
         assert_eq!(app.info.score, Some(engine::Score::Cp(35)));
+        assert_eq!(app.background.as_ref().unwrap().id, foreground);
+        app.receive(engine::Event::BestMove {
+            id: foreground,
+            best_move: Some("b8c6".into()),
+        });
+        send(&mut app, Message::Seek(3));
+        assert_eq!(app.info.score, Some(engine::Score::Cp(70)));
+        assert!(app.analysis_due.is_none());
+        app.start_background_analysis();
+        finish_background(&mut app, 90);
+        assert!(
+            app.game_analysis
+                .as_ref()
+                .unwrap()
+                .status(true)
+                .contains("4/4 positions · finished")
+        );
+    }
+    #[test]
+    fn editing_limit_cancels_foreground_without_caching_cleared_info() {
+        let mut app = app();
+        app.start_analysis(false);
+        let id = app.active.unwrap().0;
+        app.receive(engine::Event::Info {
+            id,
+            info: engine::Info {
+                score: Some(engine::Score::Cp(35)),
+                ..Default::default()
+            },
+        });
+        send(&mut app, Message::SearchLimit(String::new()));
+        assert!(app.active.is_none() && app.background.is_none());
+        app.receive(engine::Event::BestMove {
+            id,
+            best_move: Some("e2e4".into()),
+        });
+        send(&mut app, Message::SearchLimit("1000".into()));
+        assert!(
+            app.game_analysis
+                .as_ref()
+                .unwrap()
+                .get(&app.analysis_key().unwrap())
+                .is_none()
+        );
+        assert!(app.analysis_due.is_some());
     }
     #[test]
     fn off_settings_and_new_game_pause_restart_or_clear_the_queue() {
@@ -477,6 +546,59 @@ mod tests {
             });
             assert_eq!(app.best_move.as_deref(), Some("e2e4"));
         }
+    }
+    #[test]
+    fn long_game_stockfish_opt_in_completes_despite_navigation_and_lru_eviction() {
+        let Some(path) = std::env::var_os("STOCKFISH_EXECUTABLE") else {
+            return;
+        };
+        let mut pgn = String::new();
+        for pair in 0..75 {
+            pgn.push_str(&format!(
+                "{}. Nf3 Nf6 {}. Ng1 Ng8 ",
+                pair * 2 + 1,
+                pair * 2 + 2
+            ));
+        }
+        pgn.push('*');
+        let game = chess_core::pgn::parse_pgn(pgn.as_bytes())
+            .unwrap()
+            .remove(0)
+            .game;
+        let mut app = App {
+            engine_path: path.to_string_lossy().into(),
+            search_limit: "10".into(),
+            ..App::default()
+        };
+        app.game.load_line(&game);
+        app.begin_game_analysis();
+        app.start_analysis(false);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        let mut navigation = 0;
+        loop {
+            send(&mut app, Message::Seek(navigation % 301));
+            navigation += 37;
+            send(&mut app, Message::Poll);
+            let batch = app.game_analysis.as_ref().unwrap();
+            if batch.positions.iter().all(|p| p.result.is_some()) {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "{}",
+                batch.status(true)
+            );
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert_eq!(app.game_analysis.as_ref().unwrap().positions.len(), 301);
+        let requests = app.next_request;
+        for ply in 0..301 {
+            send(&mut app, Message::Seek(ply));
+            assert!(app.info.score.is_some(), "missing score at ply {ply}");
+            assert!(app.analysis_due.is_none());
+        }
+        assert_eq!(app.next_request, requests);
+        assert_eq!(app.game.line().len(), 300);
     }
     #[test]
     fn setup_fen_preserves_side_and_position_count_is_bounded_by_line() {
