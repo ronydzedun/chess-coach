@@ -2,6 +2,7 @@
 mod analysis_cache;
 pub mod appearance;
 mod appearance_ui;
+mod board_animation;
 mod board_input;
 mod evaluation;
 mod game_analysis;
@@ -48,6 +49,7 @@ pub struct App {
     panel_tab: PanelTab,
     game: Game,
     selected: Option<Square>,
+    board_motion: Option<board_animation::Transition>,
     pointer_epoch: u64,
     promotion: Option<(Square, Square)>,
     flipped: bool,
@@ -119,6 +121,7 @@ impl Default for App {
             best_move: None,
             game,
             selected: None,
+            board_motion: None,
             pointer_epoch: 0,
             promotion: None,
             flipped: false,
@@ -196,6 +199,7 @@ impl App {
         ])
     }
     fn changed(&mut self) {
+        self.board_motion = None;
         self.info = engine::Info::default();
         self.best_move = None;
         self.selected = None;
@@ -385,10 +389,13 @@ impl App {
         }
     }
     fn play(&mut self, from: Square, to: Square, promotion: Option<Role>) {
+        let before = board_animation::snapshot(&self.game);
         match self.game.play(from, to, promotion) {
             Ok(()) => {
                 self.review.mark_edited();
                 self.changed();
+                self.board_motion =
+                    board_animation::Transition::between(before, &self.game, from, to);
             }
             Err(err) => self.notice = err,
         }
@@ -456,15 +463,33 @@ impl App {
             | Message::PgnEdit(_)
             | Message::PgnLoaded(..)
             | Message::SelectGame(_) => return self.update_review(message),
-            Message::Seek(ply) => match self.game.seek(ply) {
-                Ok(true) => {
-                    self.changed();
-                    self.notice =
-                        format!("Position {} of {}", self.game.ply(), self.game.line().len());
+            Message::Seek(ply) => {
+                let old = self.game.ply();
+                let step = if old.abs_diff(ply) == 1 {
+                    self.game.line().get(old.min(ply)).map(|m| {
+                        if ply > old {
+                            (m.from, m.to)
+                        } else {
+                            (m.to, m.from)
+                        }
+                    })
+                } else {
+                    None
+                };
+                let before = board_animation::snapshot(&self.game);
+                match self.game.seek(ply) {
+                    Ok(true) => {
+                        self.changed();
+                        self.board_motion = step.and_then(|(from, to)| {
+                            board_animation::Transition::between(before, &self.game, from, to)
+                        });
+                        self.notice =
+                            format!("Position {} of {}", self.game.ply(), self.game.line().len());
+                    }
+                    Ok(false) => {}
+                    Err(error) => self.notice = error,
                 }
-                Ok(false) => {}
-                Err(error) => self.notice = error,
-            },
+            }
             Message::BoardClick(square, token) => {
                 if token == (self.game.revision(), self.pointer_epoch) {
                     return self.update(Message::Square(square));
@@ -528,8 +553,8 @@ impl App {
                 self.changed();
             }
             Message::Undo => {
-                if self.game.undo() {
-                    self.changed();
+                if let Some(ply) = self.game.ply().checked_sub(1) {
+                    return self.update(Message::Seek(ply));
                 } else {
                     self.notice = "No moves to undo".into();
                 }

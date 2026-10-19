@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //! Pointer capture for the board. Chess state changes only after a validated drop.
-use crate::{App, Message, theme};
+use crate::{App, Message, board_animation, theme};
 use chess_core::{Square, square_at};
 use iced::advanced::{
     Clipboard, Layout, Shell, Widget, layout, mouse, renderer, svg,
@@ -31,6 +31,9 @@ struct State {
     finger: Option<touch::Finger>,
     position: Option<Point>,
     preview_destinations: Vec<Square>,
+    animation: board_animation::Animation,
+    frame_time: Option<std::time::Instant>,
+    last_drop: Option<(Square, Square)>,
 }
 fn square_under(bounds: Rectangle, cell: f32, point: Point, flipped: bool) -> Option<Square> {
     let x = point.x - bounds.x - 24.0;
@@ -77,10 +80,32 @@ impl Widget<Message, Theme, iced::Renderer> for BoardInput<'_> {
     fn diff(&self, tree: &mut Tree) {
         tree.diff_children(std::slice::from_ref(&self.content));
         let state = tree.state.downcast_mut::<State>();
-        if state.identity != Some(self.identity()) {
+        let identity = self.identity();
+        if state.identity != Some(identity) {
+            let previous = state.identity;
+            if previous.is_some_and(|old| {
+                old.0 != identity.0 && old.1 == identity.1 && old.2 == identity.2
+            }) && let Some(transition) = self
+                .app
+                .board_motion
+                .as_ref()
+                .filter(|t| t.revision == identity.0)
+            {
+                state.animation.transition(
+                    transition,
+                    &self.app.game,
+                    state.last_drop.take(),
+                    std::time::Instant::now(),
+                );
+            } else {
+                state.animation.clear();
+            }
+            if self.app.promotion.is_none() {
+                state.last_drop = None;
+            }
             state.press = None;
             state.finger = None;
-            state.identity = Some(self.identity());
+            state.identity = Some(identity);
         }
     }
     fn size(&self) -> Size<Length> {
@@ -108,6 +133,12 @@ impl Widget<Message, Theme, iced::Renderer> for BoardInput<'_> {
         _viewport: &Rectangle,
     ) {
         let state = tree.state.downcast_mut::<State>();
+        if let Event::Window(iced::window::Event::RedrawRequested(now)) = event {
+            state.frame_time = Some(*now);
+            if state.animation.advance(*now) {
+                shell.request_redraw_at(*now + std::time::Duration::from_millis(16));
+            }
+        }
         if !self.enabled() {
             state.press = None;
             state.finger = None;
@@ -157,6 +188,8 @@ impl Widget<Message, Theme, iced::Renderer> for BoardInput<'_> {
         match event {
             Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)) => {
                 if let (Some(square), Some(origin)) = (square, position) {
+                    state.animation.clear();
+                    state.last_drop = None;
                     let draggable = self.app.game.piece_at(square).is_some();
                     state.preview_destinations = if self
                         .app
@@ -219,6 +252,7 @@ impl Widget<Message, Theme, iced::Renderer> for BoardInput<'_> {
                     {
                         // A visual drag of the other side never submits a move.
                     } else if press.dragging {
+                        state.last_drop = square.map(|to| (press.square, to));
                         shell.publish(Message::Dropped(
                             press.square,
                             square,
@@ -244,6 +278,7 @@ impl Widget<Message, Theme, iced::Renderer> for BoardInput<'_> {
             | Event::Mouse(mouse::Event::CursorLeft) => {
                 state.finger = None;
                 state.position = None;
+                state.animation.clear();
                 if state.press.take().is_some() {
                     shell.request_redraw();
                 }
@@ -389,7 +424,9 @@ impl Widget<Message, Theme, iced::Renderer> for BoardInput<'_> {
                             color: None,
                             rotation: iced::Radians(0.0),
                             // Retain the source slot; the preview draws above it.
-                            opacity: if moving.is_some_and(|p| p.square == square) {
+                            opacity: if moving.is_some_and(|p| p.square == square)
+                                || state.animation.contains(square)
+                            {
                                 0.0
                             } else {
                                 1.0
@@ -403,6 +440,37 @@ impl Widget<Message, Theme, iced::Renderer> for BoardInput<'_> {
                     );
                 }
             }
+        }
+        for (piece, point) in state
+            .animation
+            .pieces(state.frame_time.unwrap_or_else(std::time::Instant::now))
+        {
+            let (column, row) = if self.app.flipped {
+                (7.0 - point.x, point.y)
+            } else {
+                (point.x, 7.0 - point.y)
+            };
+            renderer.draw_svg(
+                svg::Svg {
+                    handle: svg::Handle::from_memory(
+                        self.app
+                            .appearance
+                            .piece_set
+                            .svg_bytes(piece.color, piece.role),
+                    ),
+                    color: None,
+                    rotation: iced::Radians(0.0),
+                    opacity: 1.0,
+                },
+                Rectangle::new(
+                    Point::new(
+                        bounds.x + 24.0 + (column + 0.05) * self.cell,
+                        bounds.y + (row + 0.05) * self.cell,
+                    ),
+                    Size::new(self.cell * 0.9, self.cell * 0.9),
+                ),
+                *viewport,
+            );
         }
         let Some(press) = tree
             .state
@@ -445,6 +513,7 @@ mod tests {
         renderer: iced::Renderer,
         node: layout::Node,
         redraw_requested: bool,
+        next_redraw: iced::window::RedrawRequest,
     }
     impl<'a> Harness<'a> {
         fn new(app: &'a App) -> Self {
@@ -464,6 +533,7 @@ mod tests {
                 renderer: iced::Renderer::new(iced::Font::default(), iced::Pixels(16.0)),
                 node: layout::Node::new(Size::new(424.0, 424.0)),
                 redraw_requested: false,
+                next_redraw: iced::window::RedrawRequest::Wait,
             }
         }
         fn event(&mut self, event: Event, point: Point) -> Vec<Message> {
@@ -479,8 +549,8 @@ mod tests {
                 &mut shell,
                 &Rectangle::with_size(Size::new(1000.0, 1000.0)),
             );
-            self.redraw_requested =
-                shell.redraw_request() == iced::window::RedrawRequest::NextFrame;
+            self.next_redraw = shell.redraw_request();
+            self.redraw_requested = self.next_redraw == iced::window::RedrawRequest::NextFrame;
             messages
         }
         fn press(&mut self, point: Point) {
@@ -504,6 +574,126 @@ mod tests {
                 point,
             )
         }
+    }
+    #[test]
+    fn move_animation_schedules_frames_finishes_and_does_not_restart_on_poll() {
+        let mut app = App::default();
+        let mut tree = Harness::new(&app).tree;
+        let _ = app.update(Message::Square(Square::E2));
+        let _ = app.update(Message::Square(Square::E4));
+        let mut h = Harness::new(&app);
+        h.widget.diff(&mut tree);
+        h.tree = tree;
+        let start = std::time::Instant::now();
+        assert!(
+            h.tree
+                .state
+                .downcast_ref::<State>()
+                .animation
+                .contains(Square::E4)
+        );
+        h.event(
+            Event::Window(iced::window::Event::RedrawRequested(start)),
+            Point::ORIGIN,
+        );
+        assert!(matches!(h.next_redraw, iced::window::RedrawRequest::At(_)));
+        let frame = start + board_animation::DURATION / 2;
+        h.event(
+            Event::Window(iced::window::Event::RedrawRequested(frame)),
+            Point::ORIGIN,
+        );
+        let point = h
+            .tree
+            .state
+            .downcast_ref::<State>()
+            .animation
+            .pieces(frame)
+            .next()
+            .unwrap()
+            .1;
+        h.widget.diff(&mut h.tree); // Unrelated app poll, same position and transition.
+        assert_eq!(
+            h.tree
+                .state
+                .downcast_ref::<State>()
+                .animation
+                .pieces(frame)
+                .next()
+                .unwrap()
+                .1,
+            point
+        );
+        h.event(
+            Event::Window(iced::window::Event::RedrawRequested(
+                start + board_animation::DURATION * 2,
+            )),
+            Point::ORIGIN,
+        );
+        assert!(
+            !h.tree
+                .state
+                .downcast_ref::<State>()
+                .animation
+                .contains(Square::E4)
+        );
+        assert_eq!(h.next_redraw, iced::window::RedrawRequest::Wait);
+    }
+    #[test]
+    fn drag_commit_does_not_fly_the_piece_again_and_reset_cancels_animation() {
+        let mut app = App::default();
+        let (mut tree, messages) = {
+            let mut h = Harness::new(&app);
+            h.press(Point::new(249.0, 325.0));
+            let messages = h.release(Point::new(249.0, 225.0));
+            (h.tree, messages)
+        };
+        for message in messages {
+            let _ = app.update(message);
+        }
+        Harness::new(&app).widget.diff(&mut tree);
+        assert!(
+            !tree
+                .state
+                .downcast_ref::<State>()
+                .animation
+                .contains(Square::E4)
+        );
+        let _ = app.update(Message::Undo);
+        Harness::new(&app).widget.diff(&mut tree);
+        assert!(
+            tree.state
+                .downcast_ref::<State>()
+                .animation
+                .contains(Square::E2)
+        );
+        let _ = app.update(Message::New);
+        Harness::new(&app).widget.diff(&mut tree);
+        assert!(
+            !tree
+                .state
+                .downcast_ref::<State>()
+                .animation
+                .contains(Square::E2)
+        );
+    }
+    #[test]
+    fn grabbing_a_piece_interrupts_animation_without_app_messages() {
+        let mut app = App::default();
+        let mut tree = Harness::new(&app).tree;
+        let _ = app.update(Message::Square(Square::E2));
+        let _ = app.update(Message::Square(Square::E4));
+        let mut h = Harness::new(&app);
+        h.widget.diff(&mut tree);
+        h.tree = tree;
+        h.press(Point::new(249.0, 225.0));
+        assert!(
+            !h.tree
+                .state
+                .downcast_ref::<State>()
+                .animation
+                .contains(Square::E4)
+        );
+        assert!(h.redraw_requested);
     }
     #[test]
     fn either_side_can_be_dragged_but_opponent_has_no_hints_or_release_action() {

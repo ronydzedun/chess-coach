@@ -9,6 +9,7 @@ Running application: local Stockfish analysis on Debian 13 (X11/Xvfb).
 ## What it does
 
 - Play by dragging a piece to its destination, or clicking the piece and then the destination square. Pieces of either color can be dragged visually. Pieces of the side that is not to move show no legal hints and return on release. An illegal or outside drop leaves the position unchanged; Escape cancels a drag. The board marks the selected piece and last move; legal destinations use small dots on empty squares and soft shading for captures, with no outlines.
+- Click moves, undo and adjacent review steps use a subtle 140 ms glide, including both castling pieces. Dragged pieces follow the pointer directly and do not replay the move after release. New games, FEN loads and long history jumps are instant.
 - Choose a promotion piece explicitly. The rules, including check, checkmate, stalemate, castling, and en passant, are handled by `shakmaty`.
 - Import one or more standard-chess games from PGN, then review the selected game's main line with the move list or previous/next controls.
 - Play a different move while reviewing; the imported PGN stays available in memory so you can reload its original line or choose another imported game.
