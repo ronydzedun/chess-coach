@@ -48,6 +48,7 @@ pub struct App {
     game: Game,
     selected: Option<Square>,
     dragged: Option<Square>,
+    selection_before_drag: Option<Square>,
     pointer_epoch: u64,
     promotion: Option<(Square, Square)>,
     flipped: bool,
@@ -116,6 +117,7 @@ impl Default for App {
             game,
             selected: None,
             dragged: None,
+            selection_before_drag: None,
             pointer_epoch: 0,
             promotion: None,
             flipped: false,
@@ -129,6 +131,7 @@ impl Default for App {
 pub enum Message {
     Square(Square),
     DragStarted(Square),
+    ClickReleased(Square),
     Dropped(Square, Option<Square>),
     Promote(Role),
     Cancel,
@@ -418,6 +421,12 @@ impl App {
                 Ok(false) => {}
                 Err(error) => self.notice = error,
             },
+            Message::ClickReleased(square) => {
+                if self.dragged.take().is_some() {
+                    self.selected = self.selection_before_drag.take();
+                }
+                return self.update(Message::Square(square));
+            }
             Message::DragStarted(from) => {
                 if self.promotion.is_none()
                     && self
@@ -425,6 +434,7 @@ impl App {
                         .piece_at(from)
                         .is_some_and(|p| p.color == self.game.turn())
                 {
+                    self.selection_before_drag = self.selected;
                     self.selected = Some(from);
                     self.dragged = Some(from);
                 }
@@ -954,6 +964,28 @@ mod tests {
     use super::*;
     fn send(app: &mut App, message: Message) {
         let _ = app.update(message);
+    }
+    #[test]
+    fn pressing_then_clicking_preserves_selection_and_click_to_move() {
+        let mut app = App::default();
+        let initial = app.game.fen();
+        send(&mut app, Message::DragStarted(Square::E2));
+        assert_eq!(app.game.fen(), initial);
+        assert_eq!(app.selected, Some(Square::E2));
+        send(&mut app, Message::ClickReleased(Square::E2));
+        assert!(app.dragged.is_none());
+        assert_eq!(app.selected, Some(Square::E2));
+        send(&mut app, Message::DragStarted(Square::D2));
+        send(&mut app, Message::ClickReleased(Square::D2));
+        assert_eq!(app.selected, Some(Square::D2));
+        send(&mut app, Message::DragStarted(Square::D2));
+        send(&mut app, Message::ClickReleased(Square::D2));
+        assert!(app.selected.is_none());
+        send(&mut app, Message::DragStarted(Square::E2));
+        send(&mut app, Message::ClickReleased(Square::E2));
+        send(&mut app, Message::ClickReleased(Square::E4));
+        assert_eq!(app.game.ply(), 1);
+        assert!(app.dragged.is_none());
     }
     #[test]
     fn drag_drop_validates_moves_and_cancel_preserves_position() {

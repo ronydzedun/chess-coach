@@ -18,6 +18,7 @@ pub(super) struct BoardInput<'a> {
 struct Press {
     square: Square,
     origin: Point,
+    piece_bounds: Rectangle,
     draggable: bool,
     dragging: bool,
 }
@@ -35,6 +36,14 @@ fn square_under(bounds: Rectangle, cell: f32, point: Point, flipped: bool) -> Op
         return None;
     }
     square_at((y / cell) as usize, (x / cell) as usize, flipped)
+}
+// Preserve the point at which the piece was grabbed; only translate its original bounds.
+fn moving_bounds(press: Press, position: Point) -> Rectangle {
+    Rectangle {
+        x: press.piece_bounds.x + position.x - press.origin.x,
+        y: press.piece_bounds.y + position.y - press.origin.y,
+        ..press.piece_bounds
+    }
 }
 impl BoardInput<'_> {
     fn enabled(&self) -> bool {
@@ -102,6 +111,8 @@ impl Widget<Message, Theme, iced::Renderer> for BoardInput<'_> {
             state.position = None;
             return;
         }
+        // A completed touch must not seed the next mouse press with touch coordinates.
+        let touch_ended = matches!(event, Event::Touch(touch::Event::FingerLifted { id, .. }) if state.finger == Some(*id));
         // Use one pointer path for mouse and native touch, tracking a single finger.
         let mapped;
         let (event, position) = match event {
@@ -132,14 +143,10 @@ impl Widget<Message, Theme, iced::Renderer> for BoardInput<'_> {
             }
             Event::Touch(_) => return,
             Event::Mouse(_) if state.finger.is_some() => return,
-            _ => (
-                event,
-                if state.finger.is_some() {
-                    state.position
-                } else {
-                    cursor.position()
-                },
-            ),
+            Event::Mouse(mouse::Event::CursorMoved { position }) => (event, Some(*position)),
+            // Iced supplies one cursor snapshot for a batch. Do not overwrite the
+            // ordered event positions with that snapshot on press or redraw.
+            _ => (event, state.position.or_else(|| cursor.position())),
         };
         state.position = position;
         let square =
@@ -147,16 +154,36 @@ impl Widget<Message, Theme, iced::Renderer> for BoardInput<'_> {
         match event {
             Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)) => {
                 if let (Some(square), Some(origin)) = (square, position) {
+                    let draggable = self
+                        .app
+                        .game
+                        .piece_at(square)
+                        .is_some_and(|p| p.color == self.app.game.turn());
+                    let bounds = layout.bounds();
                     state.press = Some(Press {
                         square,
                         origin,
                         dragging: false,
-                        draggable: self
-                            .app
-                            .game
-                            .piece_at(square)
-                            .is_some_and(|p| p.color == self.app.game.turn()),
+                        draggable,
+                        piece_bounds: Rectangle::new(
+                            Point::new(
+                                bounds.x
+                                    + 24.0
+                                    + ((origin.x - bounds.x - 24.0) / self.cell).floor()
+                                        * self.cell
+                                    + self.cell * 0.05,
+                                bounds.y
+                                    + ((origin.y - bounds.y) / self.cell).floor() * self.cell
+                                    + self.cell * 0.05,
+                            ),
+                            Size::new(self.cell * 0.9, self.cell * 0.9),
+                        ),
                     });
+                    if draggable {
+                        // Prepare once on press. All motion, including crossing the
+                        // click threshold, stays local and only requests a redraw.
+                        shell.publish(Message::DragStarted(square));
+                    }
                     shell.capture_event();
                 }
             }
@@ -165,9 +192,8 @@ impl Widget<Message, Theme, iced::Renderer> for BoardInput<'_> {
                     if press.draggable && !press.dragging && press.origin.distance(*position) >= 5.0
                     {
                         press.dragging = true;
-                        shell.publish(Message::DragStarted(press.square));
                     }
-                    if press.dragging {
+                    if press.draggable {
                         shell.request_redraw();
                         shell.capture_event();
                     }
@@ -178,7 +204,9 @@ impl Widget<Message, Theme, iced::Renderer> for BoardInput<'_> {
                     if press.dragging {
                         shell.publish(Message::Dropped(press.square, square));
                     } else if square == Some(press.square) {
-                        shell.publish(Message::Square(press.square));
+                        shell.publish(Message::ClickReleased(press.square));
+                    } else if press.draggable {
+                        shell.publish(Message::Dropped(press.square, None));
                     }
                     shell.request_redraw();
                     shell.capture_event();
@@ -188,12 +216,15 @@ impl Widget<Message, Theme, iced::Renderer> for BoardInput<'_> {
             | Event::Mouse(mouse::Event::CursorLeft) => {
                 state.finger = None;
                 state.position = None;
-                if state.press.take().is_some_and(|p| p.dragging) {
+                if state.press.take().is_some_and(|p| p.draggable) {
                     shell.publish(Message::Cancel);
                     shell.request_redraw();
                 }
             }
             _ => {}
+        }
+        if touch_ended {
+            state.position = None;
         }
     }
     fn mouse_interaction(
@@ -208,7 +239,7 @@ impl Widget<Message, Theme, iced::Renderer> for BoardInput<'_> {
             .state
             .downcast_ref::<State>()
             .press
-            .is_some_and(|p| p.dragging)
+            .is_some_and(|p| p.draggable)
         {
             mouse::Interaction::Grabbing
         } else if self.enabled()
@@ -245,7 +276,7 @@ impl Widget<Message, Theme, iced::Renderer> for BoardInput<'_> {
             .state
             .downcast_ref::<State>()
             .press
-            .filter(|p| p.dragging)
+            .filter(|p| p.draggable)
         else {
             return;
         };
@@ -255,7 +286,6 @@ impl Widget<Message, Theme, iced::Renderer> for BoardInput<'_> {
         let Some(piece) = self.app.game.piece_at(press.square) else {
             return;
         };
-        let size = self.cell * 0.9;
         renderer.draw_svg(
             svg::Svg {
                 handle: svg::Handle::from_memory(
@@ -268,10 +298,7 @@ impl Widget<Message, Theme, iced::Renderer> for BoardInput<'_> {
                 rotation: iced::Radians(0.0),
                 opacity: 1.0,
             },
-            Rectangle::new(
-                Point::new(position.x - size / 2.0, position.y - size / 2.0),
-                Size::new(size, size),
-            ),
+            moving_bounds(press, position),
             *viewport,
         );
     }
@@ -316,20 +343,159 @@ mod tests {
             messages
         }
         fn press(&mut self, point: Point) {
+            self.event(
+                Event::Mouse(mouse::Event::CursorMoved { position: point }),
+                point,
+            );
+            let messages = self.event(
+                Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)),
+                point,
+            );
             assert!(
-                self.event(
-                    Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)),
-                    point
-                )
-                .is_empty()
+                messages.is_empty() || matches!(messages.as_slice(), [Message::DragStarted(_)])
             );
         }
         fn release(&mut self, point: Point) -> Vec<Message> {
+            self.event(
+                Event::Mouse(mouse::Event::CursorMoved { position: point }),
+                point,
+            );
             self.event(
                 Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)),
                 point,
             )
         }
+    }
+    #[test]
+    fn off_center_grab_moves_from_first_pixel_without_threshold_snap() {
+        let app = App::default();
+        let mut h = Harness::new(&app);
+        let origin = Point::new(265.0, 310.0); // Away from e2's center.
+        h.press(origin);
+        let press = h.tree.state.downcast_ref::<State>().press.unwrap();
+        assert_eq!(moving_bounds(press, origin), press.piece_bounds);
+        let initial = press.piece_bounds;
+        for dx in [1.0, 2.0, 4.0, 5.0, 6.0, 10.0] {
+            let position = Point::new(origin.x + dx, origin.y + 1.0);
+            // Deliberately pass a different batch cursor snapshot.
+            assert!(
+                h.event(
+                    Event::Mouse(mouse::Event::CursorMoved { position }),
+                    Point::new(50.0, 50.0)
+                )
+                .is_empty()
+            );
+            let state = h.tree.state.downcast_ref::<State>();
+            let press = state.press.unwrap();
+            let bounds = moving_bounds(press, state.position.unwrap());
+            assert_eq!(bounds.x, initial.x + dx);
+            assert_eq!(bounds.y, initial.y + 1.0);
+            assert_eq!(bounds.size(), initial.size());
+        }
+    }
+    #[test]
+    fn batched_cursor_snapshot_cannot_relocate_press_or_rewind_motion() {
+        let app = App::default();
+        let mut h = Harness::new(&app);
+        let e2 = Point::new(249.0, 325.0);
+        let e4 = Point::new(249.0, 225.0);
+        h.event(Event::Mouse(mouse::Event::CursorMoved { position: e2 }), e4);
+        assert!(matches!(
+            h.event(
+                Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)),
+                e4
+            )
+            .as_slice(),
+            [Message::DragStarted(Square::E2)]
+        ));
+        assert_eq!(
+            h.tree.state.downcast_ref::<State>().press.unwrap().origin,
+            e2
+        );
+        h.event(Event::Mouse(mouse::Event::CursorMoved { position: e4 }), e2);
+        h.event(
+            Event::Window(iced::window::Event::RedrawRequested(
+                std::time::Instant::now(),
+            )),
+            e2,
+        );
+        assert_eq!(h.tree.state.downcast_ref::<State>().position, Some(e4));
+        assert!(matches!(
+            h.event(
+                Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)),
+                e2
+            )
+            .as_slice(),
+            [Message::Dropped(Square::E2, Some(Square::E4))]
+        ));
+    }
+    #[test]
+    fn batched_clicks_use_ordered_application_selection() {
+        for destinations in [[Square::E2, Square::E2], [Square::E2, Square::E4]] {
+            let mut app = App::default();
+            let messages = {
+                let mut h = Harness::new(&app);
+                let mut messages = Vec::new();
+                for square in destinations {
+                    let point = if square == Square::E2 {
+                        Point::new(249.0, 325.0)
+                    } else {
+                        Point::new(249.0, 225.0)
+                    };
+                    h.event(
+                        Event::Mouse(mouse::Event::CursorMoved { position: point }),
+                        point,
+                    );
+                    messages.extend(h.event(
+                        Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)),
+                        point,
+                    ));
+                    messages.extend(h.release(point));
+                }
+                messages
+            };
+            for message in messages {
+                let _ = app.update(message);
+            }
+            assert!(app.selected.is_none());
+            assert!(app.dragged.is_none());
+            assert_eq!(app.game.ply(), usize::from(destinations[1] == Square::E4));
+        }
+    }
+    #[test]
+    fn mouse_press_after_touch_uses_mouse_coordinates_without_motion() {
+        let app = App::default();
+        let mut h = Harness::new(&app);
+        let e2 = Point::new(249.0, 325.0);
+        let e4 = Point::new(249.0, 225.0);
+        let id = touch::Finger(1);
+        h.event(
+            Event::Touch(touch::Event::FingerPressed { id, position: e2 }),
+            e4,
+        );
+        h.event(
+            Event::Touch(touch::Event::FingerLifted { id, position: e2 }),
+            e4,
+        );
+        assert!(
+            h.event(
+                Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)),
+                e4
+            )
+            .is_empty()
+        );
+        assert_eq!(
+            h.tree.state.downcast_ref::<State>().press.unwrap().square,
+            Square::E4
+        );
+        assert!(matches!(
+            h.event(
+                Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)),
+                e4
+            )
+            .as_slice(),
+            [Message::ClickReleased(Square::E4)]
+        ));
     }
     #[test]
     fn click_threshold_and_drag_release_are_distinct() {
@@ -349,14 +515,13 @@ mod tests {
         );
         assert!(matches!(
             h.release(e2).as_slice(),
-            [Message::Square(Square::E2)]
+            [Message::ClickReleased(Square::E2)]
         ));
         h.press(e2);
-        assert!(matches!(
+        assert!(
             h.event(Event::Mouse(mouse::Event::CursorMoved { position: e4 }), e4)
-                .as_slice(),
-            [Message::DragStarted(Square::E2)]
-        ));
+                .is_empty()
+        );
         assert!(matches!(
             h.release(e4).as_slice(),
             [Message::Dropped(Square::E2, Some(Square::E4))]
@@ -411,6 +576,7 @@ mod tests {
         tree.state.downcast_mut::<State>().press = Some(Press {
             square: Square::E2,
             origin: Point::ORIGIN,
+            piece_bounds: Rectangle::default(),
             draggable: true,
             dragging: true,
         });
@@ -436,20 +602,19 @@ mod tests {
                 Point::ORIGIN
             )
             .as_slice(),
-            [Message::Square(Square::E2)]
+            [Message::ClickReleased(Square::E2)]
         ));
         h.event(
             Event::Touch(touch::Event::FingerPressed { id, position: e2 }),
             Point::ORIGIN,
         );
-        assert!(matches!(
+        assert!(
             h.event(
                 Event::Touch(touch::Event::FingerMoved { id, position: e4 }),
                 Point::ORIGIN
             )
-            .as_slice(),
-            [Message::DragStarted(Square::E2)]
-        ));
+            .is_empty()
+        );
         assert!(
             h.event(
                 Event::Touch(touch::Event::FingerLifted {
@@ -502,7 +667,7 @@ mod tests {
             h.press(e2);
             assert!(matches!(
                 h.release(e2).as_slice(),
-                [Message::Square(Square::E2)]
+                [Message::ClickReleased(Square::E2)]
             ));
         }
     }
