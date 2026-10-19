@@ -2,6 +2,7 @@
 mod analysis_cache;
 pub mod appearance;
 mod appearance_ui;
+mod board_input;
 mod evaluation;
 pub mod import;
 mod review;
@@ -46,6 +47,8 @@ pub struct App {
     panel_tab: PanelTab,
     game: Game,
     selected: Option<Square>,
+    dragged: Option<Square>,
+    pointer_epoch: u64,
     promotion: Option<(Square, Square)>,
     flipped: bool,
     fen_input: String,
@@ -112,10 +115,12 @@ impl Default for App {
             best_move: None,
             game,
             selected: None,
+            dragged: None,
+            pointer_epoch: 0,
             promotion: None,
             flipped: false,
             fen_input,
-            notice: "Select a piece, then its destination. Ctrl+N new · Ctrl+Z undo · Ctrl+F flip"
+            notice: "Drag a piece or click a piece and its destination. Ctrl+N new · Ctrl+Z undo · Ctrl+F flip"
                 .into(),
         }
     }
@@ -123,6 +128,8 @@ impl Default for App {
 #[derive(Debug, Clone)]
 pub enum Message {
     Square(Square),
+    DragStarted(Square),
+    Dropped(Square, Option<Square>),
     Promote(Role),
     Cancel,
     New,
@@ -190,6 +197,7 @@ impl App {
         self.info = engine::Info::default();
         self.best_move = None;
         self.selected = None;
+        self.dragged = None;
         self.promotion = None;
         self.fen_input = self.game.fen();
         self.notice = "Position updated".into();
@@ -371,6 +379,13 @@ impl App {
         {
             return Task::none();
         }
+        if matches!(
+            &message,
+            Message::OpenSettings | Message::OpenImport | Message::Flip | Message::Cancel
+        ) {
+            self.dragged = None;
+            self.pointer_epoch = self.pointer_epoch.wrapping_add(1);
+        }
         match message {
             Message::OpenSettings
             | Message::CloseSettings
@@ -403,6 +418,29 @@ impl App {
                 Ok(false) => {}
                 Err(error) => self.notice = error,
             },
+            Message::DragStarted(from) => {
+                if self.promotion.is_none()
+                    && self
+                        .game
+                        .piece_at(from)
+                        .is_some_and(|p| p.color == self.game.turn())
+                {
+                    self.selected = Some(from);
+                    self.dragged = Some(from);
+                }
+            }
+            Message::Dropped(from, to) => {
+                if self.dragged.take() != Some(from) || self.promotion.is_some() {
+                    return Task::none();
+                }
+                if let Some(to) = to.filter(|to| *to != from) {
+                    if self.game.needs_promotion(from, to) {
+                        self.promotion = Some((from, to));
+                    } else {
+                        self.play(from, to, None);
+                    }
+                }
+            }
             Message::Square(square) => {
                 if self.promotion.is_some() {
                     return Task::none();
@@ -594,13 +632,15 @@ impl App {
                     background = theme::tint(background, iced::Color::from_rgb8(220, 55, 55), 0.65);
                 }
                 let piece: Element<'_, Message> = match self.game.piece_at(square) {
-                    Some(p) => iced::widget::svg(iced::widget::svg::Handle::from_memory(
-                        self.appearance.piece_set.svg_bytes(p.color, p.role),
-                    ))
-                    .width(cell * 0.9)
-                    .height(cell * 0.9)
-                    .into(),
-                    None => container(iced::widget::Space::new())
+                    Some(p) if self.dragged != Some(square) => {
+                        iced::widget::svg(iced::widget::svg::Handle::from_memory(
+                            self.appearance.piece_set.svg_bytes(p.color, p.role),
+                        ))
+                        .width(cell * 0.9)
+                        .height(cell * 0.9)
+                        .into()
+                    }
+                    _ => container(iced::widget::Space::new())
                         .width(cell * 0.20)
                         .height(cell * 0.20)
                         .style(move |_| container::Style {
@@ -622,25 +662,16 @@ impl App {
                 let content = container(piece)
                     .center_x(Length::Fill)
                     .center_y(Length::Fill);
-                line = line.push(
-                    button(content)
-                        .width(cell)
-                        .height(cell)
-                        .padding(0)
-                        .on_press(Message::Square(square))
-                        .style(move |_, status| button::Style {
-                            background: Some(
-                                if status == button::Status::Hovered {
-                                    theme::tint(background, theme::INK, 0.08)
-                                } else {
-                                    background
-                                }
-                                .into(),
-                            ),
-                            text_color: theme::INK,
-                            ..Default::default()
-                        }),
-                );
+                line =
+                    line.push(
+                        content
+                            .width(cell)
+                            .height(cell)
+                            .style(move |_| container::Style {
+                                background: Some(background.into()),
+                                ..Default::default()
+                            }),
+                    );
             }
             board = board.push(line);
         }
@@ -658,7 +689,11 @@ impl App {
         }
         row![
             evaluation::view(self.info.score, self.game.turn(), self.flipped, cell * 8.0),
-            board.push(files)
+            Element::new(board_input::BoardInput {
+                content: board.push(files).into(),
+                app: self,
+                cell,
+            })
         ]
         .spacing(8)
         .into()
@@ -919,6 +954,53 @@ mod tests {
     use super::*;
     fn send(app: &mut App, message: Message) {
         let _ = app.update(message);
+    }
+    #[test]
+    fn drag_drop_validates_moves_and_cancel_preserves_position() {
+        let mut app = App::default();
+        let initial = app.game.fen();
+        for target in [None, Some(Square::E2), Some(Square::E5), Some(Square::D2)] {
+            send(&mut app, Message::DragStarted(Square::E2));
+            assert_eq!(app.dragged, Some(Square::E2));
+            send(&mut app, Message::Dropped(Square::E2, target));
+            assert_eq!(app.game.fen(), initial);
+            assert!(app.dragged.is_none());
+        }
+        send(&mut app, Message::DragStarted(Square::E7));
+        assert!(app.dragged.is_none());
+        send(&mut app, Message::DragStarted(Square::E2));
+        send(&mut app, Message::Cancel);
+        send(&mut app, Message::Dropped(Square::E2, Some(Square::E4)));
+        assert_eq!(app.game.fen(), initial);
+        send(&mut app, Message::DragStarted(Square::E2));
+        send(&mut app, Message::Dropped(Square::E2, Some(Square::E4)));
+        assert_eq!(app.game.ply(), 1);
+        assert!(app.dragged.is_none());
+        send(&mut app, Message::Undo);
+        assert_eq!(app.game.fen(), initial);
+        send(&mut app, Message::DragStarted(Square::E2));
+        send(&mut app, Message::Flip);
+        send(&mut app, Message::Dropped(Square::E2, Some(Square::E4)));
+        assert_eq!(app.game.fen(), initial);
+    }
+    #[test]
+    fn dragged_promotion_waits_for_choice_and_modal_blocks_drop() {
+        let mut app = App::default();
+        app.game.load_fen("7k/P7/8/8/8/8/8/7K w - - 0 1").unwrap();
+        let initial = app.game.fen();
+        send(&mut app, Message::DragStarted(Square::A7));
+        send(&mut app, Message::Dropped(Square::A7, Some(Square::A8)));
+        assert_eq!(app.game.fen(), initial);
+        assert_eq!(app.promotion, Some((Square::A7, Square::A8)));
+        send(&mut app, Message::Promote(Role::Knight));
+        assert_eq!(app.game.piece_at(Square::A8).unwrap().role, Role::Knight);
+        send(&mut app, Message::New);
+        let initial = app.game.fen();
+        send(&mut app, Message::DragStarted(Square::E2));
+        send(&mut app, Message::OpenSettings);
+        assert!(app.dragged.is_none());
+        send(&mut app, Message::Dropped(Square::E2, Some(Square::E4)));
+        assert_eq!(app.game.fen(), initial);
     }
     #[test]
     fn board_actions_and_fen_are_transactional() {

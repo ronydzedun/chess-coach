@@ -8,7 +8,7 @@ Running application: local Stockfish analysis on Debian 13 (X11/Xvfb).
 
 ## What it does
 
-- Play by clicking a piece and then a destination square. The board marks the selected piece and last move; legal destinations use small dots on empty squares and soft shading for captures, with no outlines.
+- Play by dragging a piece to its destination, or clicking the piece and then the destination square. An illegal or outside drop leaves the position unchanged; Escape cancels a drag. The board marks the selected piece and last move; legal destinations use small dots on empty squares and soft shading for captures, with no outlines.
 - Choose a promotion piece explicitly. The rules, including check, checkmate, stalemate, castling, and en passant, are handled by `shakmaty`.
 - Import one or more standard-chess games from PGN, then review the selected game's main line with the move list or previous/next controls.
 - Play a different move while reviewing; the imported PGN stays available in memory so you can reload its original line or choose another imported game.
@@ -75,7 +75,7 @@ Ordinary tests do not require an engine. Run real-engine checks with `STOCKFISH_
 
 Debian 13 with Hyprland has been exercised under native Wayland; the X11 UI has also been exercised in Xvfb. Full-workspace cross-target `cargo check` passes for Windows GNU and macOS Darwin. CI checks native builds, tests, Clippy and formatting on Linux, Windows and macOS; see the [current CI results](https://github.com/ronydzedun/chess-coach/actions/workflows/ci.yml) for the revision you are using. Graphical runtime on Windows/macOS remains unverified.
 
-PGN review supports standard-chess main lines, SAN validation, UTF-8 text, BOM, comments, NAGs, `SetUp`/`FEN` positions, and multiple games per import. It rejects malformed or illegal moves, unsupported variants, invalid FEN, and games without a result. Variations can’t be reviewed or edited; comments aren’t displayed. There is no PGN export, saved-game persistence, graph, training, or AI coach yet. Other prototype limits include click-to-move, a single analysis PV, and no automatic engine opponent or repetition/fifty-move claim UI. The move list starts fresh after FEN loading. The interface uses a bundled, licensed DejaVu Sans font. Board pieces are rendered from bundled SVG artwork; its artists and license terms are listed in [third-party notices](THIRD_PARTY_NOTICES.md).
+PGN review supports standard-chess main lines, SAN validation, UTF-8 text, BOM, comments, NAGs, `SetUp`/`FEN` positions, and multiple games per import. It rejects malformed or illegal moves, unsupported variants, invalid FEN, and games without a result. Variations can’t be reviewed or edited; comments aren’t displayed. There is no PGN export, saved-game persistence, graph, training, or AI coach yet. Other prototype limits include a single analysis PV, and no automatic engine opponent or repetition/fifty-move claim UI. The move list starts fresh after FEN loading. The interface uses a bundled, licensed DejaVu Sans font. Board pieces are rendered from bundled SVG artwork; its artists and license terms are listed in [third-party notices](THIRD_PARTY_NOTICES.md).
 
 ## Workspace
 

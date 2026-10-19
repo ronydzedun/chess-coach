@@ -8,7 +8,7 @@ desktop ──> chess-core
    └──────> engine
 ```
 
-`desktop` provides the `chess-coach` binary and the `iced` 0.14 interface. It uses the `tiny-skia` software renderer with Wayland and X11 support. Board interaction is click-to-move: the app sends selected squares to `chess-core` and renders its state, legal destinations, recent move, and SAN history.
+`desktop` provides the `chess-coach` binary and the `iced` 0.14 interface. It uses the `tiny-skia` software renderer with Wayland and X11 support. Board interaction supports both click-to-move and drag-and-drop. A custom Iced widget owns transient mouse/touch gestures, distinguishes clicks using a five-pixel drag threshold, and draws the moving SVG under the pointer. The app sends completed drops through the same `chess-core` validation and promotion flow as clicks; until then the chess position is unchanged. Escape, focus loss, window exit/resize, modal opening, flip and position changes cancel the gesture. The widget tracks one touch finger and releases ownership on cancellation. The app renders legal destinations, recent move and SAN history from the authoritative game state.
 
 `chess-core` wraps `shakmaty` 0.30.2 for standard chess rules, FEN, UCI move parsing, and SAN generation. It owns the position, undo snapshots, move history, and a revision counter. A move or FEN load is validated before state changes, so rejected input leaves the position untouched. Loading valid FEN starts a fresh local history. Review lines can be loaded as independent validated histories while preserving the revision sequence used to reject stale analysis.
 
