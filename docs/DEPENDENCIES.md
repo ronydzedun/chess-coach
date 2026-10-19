@@ -19,6 +19,7 @@ Expressions are publisher declarations; see [licensing review](LICENSING.md) and
 | [bitflags](https://docs.rs/crate/bitflags/1.3.2/source/) | 1.3.2 | MIT/Apache-2.0 |
 | [bitflags](https://docs.rs/crate/bitflags/2.13.2/source/) | 2.13.2 | MIT OR Apache-2.0 |
 | [block2](https://docs.rs/crate/block2/0.5.1/source/) | 0.5.1 | MIT |
+| [block2](https://docs.rs/crate/block2/0.6.2/source/) | 0.6.2 | MIT |
 | [btoi](https://docs.rs/crate/btoi/0.5.0/source/) | 0.5.0 | MIT OR Apache-2.0 |
 | [bumpalo](https://docs.rs/crate/bumpalo/3.20.3/source/) | 3.20.3 | MIT OR Apache-2.0 |
 | [bytemuck](https://docs.rs/crate/bytemuck/1.25.2/source/) | 1.25.2 | Zlib OR Apache-2.0 OR MIT |
@@ -125,6 +126,7 @@ Expressions are publisher declarations; see [licensing review](LICENSING.md) and
 | [objc2](https://docs.rs/crate/objc2/0.5.3/source/) | 0.5.3 | MIT |
 | [objc2](https://docs.rs/crate/objc2/0.6.5/source/) | 0.6.5 | MIT |
 | [objc2-app-kit](https://docs.rs/crate/objc2-app-kit/0.2.2/source/) | 0.2.2 | MIT |
+| [objc2-app-kit](https://docs.rs/crate/objc2-app-kit/0.3.2/source/) | 0.3.2 | Zlib OR Apache-2.0 OR MIT |
 | [objc2-cloud-kit](https://docs.rs/crate/objc2-cloud-kit/0.2.2/source/) | 0.2.2 | MIT |
 | [objc2-contacts](https://docs.rs/crate/objc2-contacts/0.2.2/source/) | 0.2.2 | MIT |
 | [objc2-core-data](https://docs.rs/crate/objc2-core-data/0.2.2/source/) | 0.2.2 | MIT |
@@ -150,6 +152,7 @@ Expressions are publisher declarations; see [licensing review](LICENSING.md) and
 | [parking_lot](https://docs.rs/crate/parking_lot/0.12.5/source/) | 0.12.5 | MIT OR Apache-2.0 |
 | [parking_lot_core](https://docs.rs/crate/parking_lot_core/0.9.12/source/) | 0.9.12 | MIT OR Apache-2.0 |
 | [percent-encoding](https://docs.rs/crate/percent-encoding/2.3.2/source/) | 2.3.2 | MIT OR Apache-2.0 |
+| [pgn-reader](https://docs.rs/crate/pgn-reader/0.29.1/source/) | 0.29.1 | GPL-3.0-or-later |
 | [pin-project](https://docs.rs/crate/pin-project/1.1.13/source/) | 1.1.13 | Apache-2.0 OR MIT |
 | [pin-project-internal](https://docs.rs/crate/pin-project-internal/1.1.13/source/) | 1.1.13 | Apache-2.0 OR MIT |
 | [pin-project-lite](https://docs.rs/crate/pin-project-lite/0.2.17/source/) | 0.2.17 | Apache-2.0 OR MIT |
@@ -157,6 +160,7 @@ Expressions are publisher declarations; see [licensing review](LICENSING.md) and
 | [pkg-config](https://docs.rs/crate/pkg-config/0.3.34/source/) | 0.3.34 | MIT OR Apache-2.0 |
 | [plain](https://docs.rs/crate/plain/0.2.3/source/) | 0.2.3 | MIT/Apache-2.0 |
 | [polling](https://docs.rs/crate/polling/3.11.0/source/) | 3.11.0 | Apache-2.0 OR MIT |
+| [pollster](https://docs.rs/crate/pollster/0.4.0/source/) | 0.4.0 | Apache-2.0/MIT |
 | [proc-macro-crate](https://docs.rs/crate/proc-macro-crate/3.5.0/source/) | 3.5.0 | MIT OR Apache-2.0 |
 | [proc-macro2](https://docs.rs/crate/proc-macro2/1.0.107/source/) | 1.0.107 | MIT OR Apache-2.0 |
 | [quick-xml](https://docs.rs/crate/quick-xml/0.41.0/source/) | 0.41.0 | MIT |
@@ -170,6 +174,7 @@ Expressions are publisher declarations; see [licensing review](LICENSING.md) and
 | [redox_syscall](https://docs.rs/crate/redox_syscall/0.4.1/source/) | 0.4.1 | MIT |
 | [redox_syscall](https://docs.rs/crate/redox_syscall/0.5.18/source/) | 0.5.18 | MIT |
 | [redox_syscall](https://docs.rs/crate/redox_syscall/0.9.5/source/) | 0.9.5 | MIT |
+| [rfd](https://docs.rs/crate/rfd/0.17.2/source/) | 0.17.2 | MIT |
 | [roxmltree](https://docs.rs/crate/roxmltree/0.20.0/source/) | 0.20.0 | MIT OR Apache-2.0 |
 | [rustc-hash](https://docs.rs/crate/rustc-hash/1.1.0/source/) | 1.1.0 | Apache-2.0/MIT |
 | [rustc-hash](https://docs.rs/crate/rustc-hash/2.1.3/source/) | 2.1.3 | Apache-2.0 OR MIT |

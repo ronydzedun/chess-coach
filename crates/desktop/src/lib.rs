@@ -1,11 +1,14 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+pub mod import;
+mod review;
 pub mod theme;
 use chess_core::{Color, Game, Role, Square, square_at};
 use iced::widget::{
     Column, Row, button, column, container, pick_list, responsive, row, scrollable, text,
-    text_input,
+    text_editor, text_input,
 };
 use iced::{Alignment, Border, Element, Length, Subscription, Task, keyboard};
+pub use review::GameChoice;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SearchMode {
@@ -20,7 +23,15 @@ impl std::fmt::Display for SearchMode {
         })
     }
 }
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PanelTab {
+    #[default]
+    Analysis,
+    Moves,
+}
 pub struct App {
+    review: review::Review,
+    panel_tab: PanelTab,
     game: Game,
     selected: Option<Square>,
     promotion: Option<(Square, Square)>,
@@ -52,6 +63,8 @@ impl Default for App {
         }
         .into();
         Self {
+            review: review::Review::default(),
+            panel_tab: PanelTab::Analysis,
             engine: engine::Engine::new(),
             engine_path,
             engine_status,
@@ -90,6 +103,15 @@ pub enum Message {
     Stop,
     Poll,
     Key(keyboard::Event),
+    Seek(usize),
+    Panel(PanelTab),
+    OpenImport,
+    CancelImport,
+    OpenPgnFile,
+    ImportPasted,
+    PgnEdit(text_editor::Action),
+    PgnLoaded(u64, Result<Option<import::ImportedPgn>, String>),
+    SelectGame(GameChoice),
 }
 impl App {
     pub fn subscription(&self) -> Subscription<Message> {
@@ -185,12 +207,32 @@ impl App {
     }
     fn play(&mut self, from: Square, to: Square, promotion: Option<Role>) {
         match self.game.play(from, to, promotion) {
-            Ok(()) => self.changed(),
+            Ok(()) => {
+                self.review.mark_edited();
+                self.changed();
+            }
             Err(err) => self.notice = err,
         }
     }
     pub fn update(&mut self, message: Message) -> Task<Message> {
         match message {
+            Message::Panel(tab) => self.panel_tab = tab,
+            Message::OpenImport
+            | Message::CancelImport
+            | Message::OpenPgnFile
+            | Message::ImportPasted
+            | Message::PgnEdit(_)
+            | Message::PgnLoaded(..)
+            | Message::SelectGame(_) => return self.update_review(message),
+            Message::Seek(ply) => match self.game.seek(ply) {
+                Ok(true) => {
+                    self.changed();
+                    self.notice =
+                        format!("Position {} of {}", self.game.ply(), self.game.line().len());
+                }
+                Ok(false) => {}
+                Err(error) => self.notice = error,
+            },
             Message::Square(square) => {
                 if self.promotion.is_some() {
                     return Task::none();
@@ -222,6 +264,7 @@ impl App {
             }
             Message::New => {
                 self.game.reset();
+                self.review.detach();
                 self.changed();
             }
             Message::Undo => {
@@ -234,7 +277,10 @@ impl App {
             Message::Flip => self.flipped = !self.flipped,
             Message::FenChanged(value) => self.fen_input = value,
             Message::LoadFen => match self.game.load_fen(&self.fen_input) {
-                Ok(()) => self.changed(),
+                Ok(()) => {
+                    self.review.detach();
+                    self.changed();
+                }
                 Err(err) => self.notice = err,
             },
             Message::CopyFen => {
@@ -262,8 +308,33 @@ impl App {
                 }
             }
             Message::Key(keyboard::Event::KeyPressed { key, modifiers, .. }) => {
+                if self.review.import_open {
+                    if key.as_ref() == keyboard::Key::Named(keyboard::key::Named::Escape) {
+                        return self.update(Message::CancelImport);
+                    }
+                    return Task::none();
+                }
                 let action = match key.as_ref() {
                     keyboard::Key::Named(keyboard::key::Named::Escape) => Some(Message::Cancel),
+                    keyboard::Key::Character("o") if modifiers.command() => {
+                        Some(Message::OpenImport)
+                    }
+                    keyboard::Key::Named(keyboard::key::Named::ArrowLeft)
+                        if modifiers.is_empty() =>
+                    {
+                        self.game.ply().checked_sub(1).map(Message::Seek)
+                    }
+                    keyboard::Key::Named(keyboard::key::Named::ArrowRight)
+                        if modifiers.is_empty() && self.game.ply() < self.game.line().len() =>
+                    {
+                        Some(Message::Seek(self.game.ply() + 1))
+                    }
+                    keyboard::Key::Named(keyboard::key::Named::Home) if modifiers.is_empty() => {
+                        Some(Message::Seek(0))
+                    }
+                    keyboard::Key::Named(keyboard::key::Named::End) if modifiers.is_empty() => {
+                        Some(Message::Seek(self.game.line().len()))
+                    }
                     keyboard::Key::Character("n") if modifiers.command() => Some(Message::New),
                     keyboard::Key::Character("z") if modifiers.command() => Some(Message::Undo),
                     keyboard::Key::Character("f") if modifiers.command() => Some(Message::Flip),
@@ -367,26 +438,50 @@ impl App {
         }
         board.push(files).into()
     }
-    fn panel(&self) -> Element<'_, Message> {
+    fn move_list(&self) -> Element<'_, Message> {
         let mut history = Column::new().spacing(7);
-        for m in self.game.history() {
+        for (index, m) in self.game.line().iter().enumerate() {
             let prefix = if m.mover == Color::White {
                 format!("{}.", m.number)
             } else {
                 format!("{}…", m.number)
             };
-            history = history.push(row![
-                text(prefix).color(theme::MUTED).width(44),
-                text(&m.san)
-            ]);
+            let current = self.game.ply() == index + 1;
+            let future = index >= self.game.ply();
+            history = history.push(
+                button(row![text(prefix).width(44), text(&m.san)])
+                    .width(Length::Fill)
+                    .on_press(Message::Seek(index + 1))
+                    .style(move |theme, status| {
+                        let mut style = if current {
+                            button::primary(theme, status)
+                        } else {
+                            button::text(theme, status)
+                        };
+                        if future {
+                            style.text_color = crate::theme::MUTED;
+                        }
+                        style
+                    }),
+            );
         }
-        if self.game.history().is_empty() {
+        if self.game.line().is_empty() {
             history = history.push(
                 text("Your moves will appear here")
                     .size(13)
                     .color(theme::MUTED),
             );
         }
+        column![
+            text("MOVES · click to navigate")
+                .size(12)
+                .color(theme::ACCENT),
+            history
+        ]
+        .spacing(8)
+        .into()
+    }
+    fn engine_controls(&self) -> Element<'_, Message> {
         let score = match self.info.score {
             Some(engine::Score::Cp(cp)) => format!("{:+.2}", f64::from(cp) / 100.0),
             Some(engine::Score::Mate(0)) => format!(
@@ -405,7 +500,7 @@ impl App {
         } else {
             self.info.pv.join(" ")
         };
-        let mut panel = column![
+        let panel = column![
             text("LOCAL ANALYSIS").size(12).color(theme::ACCENT),
             text("Stockfish").size(26),
             text_input("Path to Stockfish executable", &self.engine_path)
@@ -447,6 +542,28 @@ impl App {
             text(pv).size(13),
         ]
         .spacing(12);
+        panel.into()
+    }
+    fn panel(&self) -> Element<'_, Message> {
+        let analysis = self.panel_tab == PanelTab::Analysis;
+        let tabs = row![
+            button("Analysis")
+                .on_press(Message::Panel(PanelTab::Analysis))
+                .style(move |theme, status| if analysis {
+                    button::primary(theme, status)
+                } else {
+                    button::text(theme, status)
+                }),
+            button("Moves")
+                .on_press(Message::Panel(PanelTab::Moves))
+                .style(move |theme, status| if !analysis {
+                    button::primary(theme, status)
+                } else {
+                    button::text(theme, status)
+                }),
+        ]
+        .spacing(8);
+        let mut panel = column![tabs, self.review_controls()].spacing(12);
         if self.promotion.is_some() {
             panel = panel
                 .push(text("Choose promotion").color(theme::ACCENT))
@@ -466,14 +583,18 @@ impl App {
                     .spacing(5),
                 );
         }
-        panel = panel
-            .push(text("MOVES").size(12).color(theme::ACCENT))
-            .push(history);
+        panel = panel.push(match self.panel_tab {
+            PanelTab::Analysis => self.engine_controls(),
+            PanelTab::Moves => self.move_list(),
+        });
         scrollable(container(panel).padding(16).width(Length::Fill))
             .height(Length::Fill)
             .into()
     }
     pub fn view(&self) -> Element<'_, Message> {
+        if self.review.import_open {
+            return self.import_view();
+        }
         let turn = if self.game.turn() == Color::White {
             "White"
         } else {
@@ -492,7 +613,8 @@ impl App {
         let toolbar = row![
             button("New game").on_press(Message::New),
             button("Undo").on_press(Message::Undo),
-            button("Flip board").on_press(Message::Flip)
+            button("Flip board").on_press(Message::Flip),
+            button("Import PGN").on_press(Message::OpenImport)
         ]
         .spacing(8);
         let fen = row![

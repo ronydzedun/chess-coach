@@ -10,10 +10,18 @@ Running application: local Stockfish analysis on Debian 13 (X11/Xvfb).
 
 - Play by clicking a piece and then a destination square. The board marks the selected piece, legal destinations, and the last move.
 - Choose a promotion piece explicitly. The rules, including check, checkmate, stalemate, castling, and en passant, are handled by `shakmaty`.
-- Review the move list in standard algebraic notation (SAN), undo a move, start a new game, or flip the board.
+- Import one or more standard-chess games from PGN, then review the selected game's main line with the move list or previous/next controls.
+- Play a different move while reviewing; the imported PGN stays available in memory so you can reload its original line or choose another imported game.
+- Undo moves without losing the forward line; making a new move replaces only the future of the working line.
 - Load a position from FEN and copy the current FEN. Invalid FEN leaves the current position and history intact.
 
-For local analysis, install Stockfish (or another UCI-compatible engine) separately and choose its executable in the app. The app can also use `STOCKFISH_EXECUTABLE`, search `PATH`, and check `/usr/games/stockfish` for Stockfish. Choose a time limit in milliseconds or a search depth; displayed centipawn and mate scores use White's perspective, and the principal variation uses UCI coordinate notation. The engine is never bundled. PGN import/export, saved games, and cloud or AI services are not included.
+Import PGN by pasting text or opening a `.pgn` file. Imports are parsed in a background worker and accepted atomically: if any game is invalid, the import is rejected and the current board is preserved. Limits are 8 MiB per import, 256 games, 2,048 plies per game, and 50,000 plies total. Imported games are retained only in memory. The original source is never modified. PGN export, saved games, and cloud or AI services are not included.
+
+For local analysis, install Stockfish (or another UCI-compatible engine) separately and choose its executable in the app. The app can also use `STOCKFISH_EXECUTABLE`, search `PATH`, and check `/usr/games/stockfish` for Stockfish. Choose a time limit in milliseconds or a search depth; displayed centipawn and mate scores use White's perspective, and the principal variation uses UCI coordinate notation. The engine is never bundled.
+
+![Chess Coach PGN review](assets/screenshots/review-linux.png)
+
+PGN review in the running application (Debian 13, X11/Xvfb).
 
 ## Build and run
 
@@ -30,7 +38,11 @@ Then run the desktop app from the repository root:
 cargo run --locked -p desktop --bin chess-coach
 ```
 
+On Debian/Hyprland, the native file picker needs a file-chooser portal backend or Zenity at runtime. For example: `sudo apt install xdg-desktop-portal xdg-desktop-portal-gtk zenity`. The wlroots/Hyprland screen-sharing portal alone may not provide a file chooser. Pasting PGN remains available if no dialog backend is installed.
+
 The app uses the `iced` 0.14 UI toolkit with its `tiny-skia` software renderer and native Wayland/X11 backends. It does not use a Vulkan or `wgpu` renderer.
+
+After import, the **Moves** tab shows the complete line and highlights the current move. The **Analysis** tab analyzes the selected position. Switching tabs preserves the position and any running analysis.
 
 ## Stockfish and controls
 
@@ -38,7 +50,7 @@ On Debian, install the separate engine with `sudo apt install stockfish`. It nor
 
 Choose **Time (ms)** (1–300000) or **Depth** (1–128), then **Analyze**. **Stop** cancels the search; changing position also cancels it and clears the old evaluation. Depth searches have a 60-second safety deadline. Positive scores favor White, negative scores favor Black. `M+3` means White can mate in three moves; `M-3` means Black can mate in three. `M0` identifies the winner in an already mated position. The best move and principal variation are UCI coordinates, not SAN.
 
-Click a piece, then its destination. Ctrl/Cmd+N starts a new game, Ctrl/Cmd+Z undoes, Ctrl/Cmd+F flips; Escape cancels a selection or promotion. FEN can be submitted with Enter. No network service, account, telemetry or external API is required.
+Click a piece, then its destination. Ctrl/Cmd+O opens PGN import, Ctrl/Cmd+N starts a new game, Ctrl/Cmd+Z undoes, Ctrl/Cmd+F flips; Escape cancels a selection or promotion. FEN can be submitted with Enter. No network service, account, telemetry or external API is required.
 
 ## Validation and platform status
 
@@ -51,9 +63,9 @@ cargo clippy --workspace --all-targets --locked -- -D warnings
 
 Ordinary tests do not require an engine. Run real-engine checks with `STOCKFISH_EXECUTABLE=/usr/games/stockfish cargo test -p engine --locked -- --nocapture`. See [development](docs/DEVELOPMENT.md) for details.
 
-Debian 13 with Hyprland has been exercised under native Wayland; the X11 UI has also been exercised in Xvfb. Full-workspace cross-target `cargo check` passes for Windows GNU and macOS Darwin. Native builds, tests, Clippy and formatting pass in GitHub Actions on Linux, Windows and macOS; see the [verified CI run](https://github.com/ronydzedun/chess-coach/actions/runs/39242742750). Graphical runtime on Windows/macOS remains unverified.
+Debian 13 with Hyprland has been exercised under native Wayland; the X11 UI has also been exercised in Xvfb. Full-workspace cross-target `cargo check` passes for Windows GNU and macOS Darwin. CI checks native builds, tests, Clippy and formatting on Linux, Windows and macOS; see the [current CI results](https://github.com/ronydzedun/chess-coach/actions/workflows/ci.yml) for the revision you are using. Graphical runtime on Windows/macOS remains unverified.
 
-This is a prototype: click-to-move only, single PV, no automatic engine opponent, no PGN import, repetition/fifty-move claim UI, persistence, training, or AI coach yet. The move list starts fresh after FEN loading. Unicode pieces use the bundled, licensed DejaVu Sans font; Windows/macOS font rendering is not yet verified.
+PGN review supports standard-chess main lines, SAN validation, UTF-8 text, BOM, comments, NAGs, `SetUp`/`FEN` positions, and multiple games per import. It rejects malformed or illegal moves, unsupported variants, invalid FEN, and games without a result. Variations can’t be reviewed or edited; comments aren’t displayed. There is no PGN export, persistence, graph, training, or AI coach yet. Other prototype limits include click-to-move, a single analysis PV, and no automatic engine opponent or repetition/fifty-move claim UI. The move list starts fresh after FEN loading. Unicode pieces use the bundled, licensed DejaVu Sans font; Windows/macOS font rendering is not yet verified.
 
 ## Workspace
 

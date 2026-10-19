@@ -10,6 +10,8 @@ Direct libraries were checked against published crate manifests and source:
 | --- | --- | --- | --- |
 | iced | 0.14.0 | MIT | 1.88 |
 | shakmaty | 0.30.2 | GPL-3.0-or-later | 1.97 |
+| pgn-reader | 0.29.1 | GPL-3.0-or-later | 1.97 |
+| rfd | 0.17.2 | MIT | not declared; compiled with Rust 1.99.1 |
 | libc (Unix engine pipe polling) | see Cargo.lock | MIT OR Apache-2.0 | see crate manifest |
 | windows-sys (Windows pipe polling) | see Cargo.lock | MIT OR Apache-2.0 | see crate manifest |
 

@@ -13,3 +13,4 @@ path = "src/main.rs"
 chess-core = { path = "../chess-core" }
 engine = { path = "../engine" }
 iced.workspace = true
+rfd = "0.17.2"

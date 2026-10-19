@@ -11,6 +11,8 @@
     libx11-dev libxcursor-dev libxi-dev libxrandr-dev libxkbcommon-x11-0
   ```
 
+PGN file selection uses `rfd`'s native dialogs. On Linux, the dialog tries XDG Desktop Portal and can fall back to `zenity`; install a portal implementation or `zenity` if the file picker is unavailable. Windows and macOS use their native dialogs.
+
 ## Common commands
 
 Run the application:
@@ -38,8 +40,22 @@ Install `cargo-deny 0.20.2` and run `cargo deny --locked check licenses` when de
 
 ## UI behavior
 
-Moves use click-to-move: select a piece, then select a legal destination. Press Escape to clear the current selection or cancel a pending promotion. Keyboard shortcuts are Ctrl/Cmd+N for a new game, Ctrl/Cmd+Z to undo, and Ctrl/Cmd+F to flip the board. Submit FEN with Enter or the Load FEN button; Copy places the current FEN on the system clipboard.
+Moves use click-to-move: select a piece, then select a legal destination. Press Escape to clear the current selection or cancel a pending promotion. Keyboard shortcuts are Ctrl/Cmd+O for PGN import, Ctrl/Cmd+N for a new game, Ctrl/Cmd+Z to undo, and Ctrl/Cmd+F to flip the board. Submit FEN with Enter or the Load FEN button; Copy places the current FEN on the system clipboard.
+
+PGN review accepts pasted text or a selected file. File reading and parsing happen in a background worker. An import is atomic and bounded to 8 MiB, 256 games, 2,048 plies per game, and 50,000 plies total; a failed or cancelled import leaves the current board intact. It validates standard-chess main lines, SAN, `SetUp`/`FEN`, and game results. It accepts UTF-8 with an optional BOM, comments, and NAGs; it rejects unsupported variants and malformed or illegal moves. Navigation keys Left/Right/Home/End work when focus is outside the text editor. Undo retains the forward working line until a new move branches it; the original imported line remains available to reload. Source PGN is not changed, and imported data is not persisted.
+
+Successful import selects the Moves tab; Analysis opens the engine controls for the current position. Tab changes do not invalidate analysis. Supplied check/mate SAN suffixes must match the board (omitted suffixes are accepted). Explicit results cannot contradict a checkmate or stalemate; `*` remains valid for analysis positions.
+
+The current review scope does not include variation review or editing, comment display, PGN export, persistence, graphs, training, or AI coaching.
+
+## PGN UI smoke check
+
+1. Run the app and choose Import PGN → Open PGN file. Select `crates/chess-core/tests/fixtures/synthetic_chess_com.pgn`, or paste its contents and import.
+2. Switch between the two games. Use Start/Back/Next/End, arrow keys, and the move list; the complete line should remain available.
+3. Go to an earlier position and play another legal move. Reload original to restore the imported line.
+4. Paste `1.e4 e5 2.Bh6 *`. Import must report an illegal move; Cancel must return to the previous position.
+5. Analyze an imported position with Stockfish, then navigate away. The old score/PV must clear immediately.
 
 ## Platform status
 
-The app has been launched on Debian 13 under native Wayland with Hyprland, and a mouse-driven `e2` to `e4` move was exercised. Full-workspace `cargo check --all-targets` passed for Windows GNU and macOS Darwin targets. Native builds, tests, Clippy and formatting also pass on the Linux, Windows and macOS GitHub Actions runners; see the [verified CI run](https://github.com/ronydzedun/chess-coach/actions/runs/39242742750). Graphical runtime on Windows/macOS remains unverified.
+The app has been launched on Debian 13 under native Wayland with Hyprland, and a mouse-driven `e2` to `e4` move was exercised. Full-workspace `cargo check --all-targets` passed for Windows GNU and macOS Darwin targets. CI checks native builds, tests, Clippy and formatting on the Linux, Windows and macOS runners; consult the [current CI results](https://github.com/ronydzedun/chess-coach/actions/workflows/ci.yml) for the revision being tested. Graphical runtime on Windows/macOS remains unverified.
