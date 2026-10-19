@@ -51,7 +51,7 @@ cargo clippy --workspace --all-targets --locked -- -D warnings
 
 Ordinary tests do not require an engine. Run real-engine checks with `STOCKFISH_EXECUTABLE=/usr/games/stockfish cargo test -p engine --locked -- --nocapture`. See [development](docs/DEVELOPMENT.md) for details.
 
-Debian 13 with Hyprland has been exercised under native Wayland; the X11 UI has also been exercised in Xvfb. Full-workspace cross-target `cargo check` passes for Windows GNU and macOS Darwin; native builds, tests and runtime on those systems remain unverified. CI is configured for Linux, Windows and macOS; a configured workflow is not proof of a passing run.
+Debian 13 with Hyprland has been exercised under native Wayland; the X11 UI has also been exercised in Xvfb. Full-workspace cross-target `cargo check` passes for Windows GNU and macOS Darwin. Native builds, tests, Clippy and formatting pass in GitHub Actions on Linux, Windows and macOS; see the [verified CI run](https://github.com/ronydzedun/chess-coach/actions/runs/39242742750). Graphical runtime on Windows/macOS remains unverified.
 
 This is a prototype: click-to-move only, single PV, no automatic engine opponent, no PGN import, repetition/fifty-move claim UI, persistence, training, or AI coach yet. The move list starts fresh after FEN loading. Unicode pieces use the bundled, licensed DejaVu Sans font; Windows/macOS font rendering is not yet verified.
 

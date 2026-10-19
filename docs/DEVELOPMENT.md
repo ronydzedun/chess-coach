@@ -42,4 +42,4 @@ Moves use click-to-move: select a piece, then select a legal destination. Press 
 
 ## Platform status
 
-The app has been launched on Debian 13 under native Wayland with Hyprland, and a mouse-driven `e2` to `e4` move was exercised. Full-workspace `cargo check --all-targets` passed for Windows GNU and macOS Darwin targets. Native linking, tests and runtime on those systems remain unverified; configured CI coverage is not a claim of supported platforms.
+The app has been launched on Debian 13 under native Wayland with Hyprland, and a mouse-driven `e2` to `e4` move was exercised. Full-workspace `cargo check --all-targets` passed for Windows GNU and macOS Darwin targets. Native builds, tests, Clippy and formatting also pass on the Linux, Windows and macOS GitHub Actions runners; see the [verified CI run](https://github.com/ronydzedun/chess-coach/actions/runs/39242742750). Graphical runtime on Windows/macOS remains unverified.
