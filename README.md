@@ -8,7 +8,7 @@ Running application: local Stockfish analysis on Debian 13 (X11/Xvfb).
 
 ## What it does
 
-- Play by clicking a piece and then a destination square. The board marks the selected piece, legal destinations, and the last move.
+- Play by clicking a piece and then a destination square. The board marks the selected piece and last move; legal destinations use small dots on empty squares and soft shading for captures, with no outlines.
 - Choose a promotion piece explicitly. The rules, including check, checkmate, stalemate, castling, and en passant, are handled by `shakmaty`.
 - Import one or more standard-chess games from PGN, then review the selected game's main line with the move list or previous/next controls.
 - Play a different move while reviewing; the imported PGN stays available in memory so you can reload its original line or choose another imported game.
@@ -17,7 +17,7 @@ Running application: local Stockfish analysis on Debian 13 (X11/Xvfb).
 
 Import PGN by pasting text or opening a `.pgn` file. Imports are parsed in a background worker and accepted atomically: if any game is invalid, the import is rejected and the current board is preserved. Limits are 8 MiB per import, 256 games, 2,048 plies per game, and 50,000 plies total. Imported games are retained only in memory. The original source is never modified. PGN export, saved games, and cloud or AI services are not included.
 
-For local analysis, install Stockfish (or another UCI-compatible engine) separately. The app can use `STOCKFISH_EXECUTABLE`, search `PATH`, and check `/usr/games/stockfish`; the engine is never bundled. Analysis starts automatically at launch and 300 ms after a position, FEN, import, or review-navigation change. One **Analysis: ON/OFF** toggle controls automatic analysis for this session; it defaults to ON at each launch. Set a bounded time limit (1–300000 ms, default 1000) or depth (1–128); depth searches have a 60-second safety deadline. Changing the engine path or limits cancels and restarts automatic analysis when enabled. Errors do not trigger automatic retry loops. Scores use White's perspective, and the principal variation uses UCI coordinate notation. A vertical bar beside the board shows a bounded centipawn balance, not win probability; unknown scores are neutral and mate scores are saturated, with M0 identifying the winner.
+For local analysis, install Stockfish (or another UCI-compatible engine) separately. A saved custom path takes priority; otherwise the app can use `STOCKFISH_EXECUTABLE`, search `PATH`, and check `/usr/games/stockfish`; the engine is never bundled. Analysis starts automatically at launch and 300 ms after a position, FEN, import, or review-navigation change. One **Analysis: ON/OFF** toggle controls automatic analysis for this session; it defaults to ON at each launch. Set a bounded time limit (1–300000 ms, default 1000) or depth (1–128); depth searches have a 60-second safety deadline. Applying a different engine path or changing the limits cancels and restarts automatic analysis when enabled. Errors do not trigger automatic retry loops. Scores use White's perspective, and the principal variation uses UCI coordinate notation. A vertical bar beside the board shows a bounded centipawn balance, not win probability; unknown scores are neutral and mate scores are saturated, with M0 identifying the winner.
 
 ![Chess Coach PGN review](assets/screenshots/review-linux.png)
 
@@ -42,13 +42,15 @@ On Debian/Hyprland, the native file picker needs a file-chooser portal backend o
 
 The app uses the `iced` 0.14 UI toolkit with its `tiny-skia` software renderer and native Wayland/X11 backends. It does not use a Vulkan or `wgpu` renderer.
 
-After import, the **Moves** tab shows the complete line and highlights the current move. Switching tabs preserves the position and any running analysis. The **Appearance** toolbar button opens controls for three bundled SVG piece sets (Merida, Celtic, RhosGFX), four board palettes, and custom palettes with a name and light/dark `#RRGGBB` colors. Appearance choices are saved in `appearance.json` under the user configuration directory.
+After import, the **Moves** tab shows the complete line and highlights the current move. Switching tabs preserves the position and any running analysis. The **Settings** toolbar button opens a settings dialog. **Engine** lets you save a Stockfish path with **Apply**; an empty path enables automatic discovery. **Cancel**, Escape, and closing the dialog discard path edits. **Appearance** provides controls for three bundled SVG piece sets (Merida, Celtic, RhosGFX), four board palettes, and custom palettes with a name and light/dark `#RRGGBB` colors. Appearance choices are saved in `appearance.json` under the user configuration directory.
+
+![Chess Coach settings](assets/screenshots/settings-linux.png)
 
 ![Chess Coach appearance](assets/screenshots/appearance-linux.png)
 
 ## Stockfish and controls
 
-On Debian, install the separate engine with `sudo apt install stockfish`. It normally lives at `/usr/games/stockfish`. For other systems, obtain a compatible executable from [Stockfish upstream](https://stockfishchess.org/download/) and enter its full path in the side panel, or set `STOCKFISH_EXECUTABLE` before launching. Paths containing spaces are supported; shell expansions such as `~` are not performed. A missing engine does not prevent using the board or FEN.
+On Debian, install the separate engine with `sudo apt install stockfish`. It normally lives at `/usr/games/stockfish`. For other systems, obtain a compatible executable from [Stockfish upstream](https://stockfishchess.org/download/) and enter its full path in **Settings → Engine** and choose **Apply**, or set `STOCKFISH_EXECUTABLE` before launching. Paths containing spaces are supported; shell expansions such as `~` are not performed. A missing engine does not prevent using the board or FEN.
 
 Automatic analysis runs by default after launch and relevant position changes. Use the single **Analysis: ON/OFF** toggle to control it for the current session. Changing position cancels the old search and clears its evaluation. Depth searches have a 60-second safety deadline. Positive scores favor White, negative scores favor Black. `M+3` means White can mate in three moves; `M-3` means Black can mate in three. `M0` identifies the winner in an already mated position. The best move and principal variation are UCI coordinates, not SAN.
 

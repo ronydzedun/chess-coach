@@ -4,13 +4,15 @@ mod appearance_ui;
 mod evaluation;
 pub mod import;
 mod review;
+mod settings_ui;
+pub use settings_ui::SettingsTab;
 pub mod theme;
 use chess_core::{Color, Game, Role, Square, square_at};
 use iced::widget::{
     Column, Row, button, column, container, pick_list, responsive, row, scrollable, text,
     text_editor, text_input,
 };
-use iced::{Alignment, Border, Element, Length, Subscription, Task, keyboard};
+use iced::{Alignment, Element, Length, Subscription, Task, keyboard};
 pub use review::GameChoice;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -31,9 +33,9 @@ pub enum PanelTab {
     #[default]
     Analysis,
     Moves,
-    Appearance,
 }
 pub struct App {
+    settings: Option<settings_ui::Dialog>,
     appearance: appearance::Settings,
     palette_name: String,
     palette_light: String,
@@ -64,23 +66,26 @@ impl Default for App {
     fn default() -> Self {
         let game = Game::default();
         let fen_input = game.fen();
-        let engine_path = engine::discover()
-            .map(|p| p.to_string_lossy().into_owned())
-            .unwrap_or_default();
-        let engine_status = if engine_path.is_empty() {
-            "No engine found. Enter an executable path."
-        } else {
-            "Engine found. Ready to analyze."
-        }
-        .into();
         let (appearance, appearance_status) = match appearance::Settings::load() {
             Ok(settings) => (settings, String::new()),
             Err(error) => (
                 appearance::Settings::default(),
-                format!("Using default appearance. {error}"),
+                format!("Using default settings. {error}"),
             ),
         };
+        let engine_path = appearance.engine_path.clone().unwrap_or_else(|| {
+            engine::discover()
+                .map(|p| p.to_string_lossy().into_owned())
+                .unwrap_or_default()
+        });
+        let engine_status = if engine_path.is_empty() {
+            "No engine found. Open Settings to configure Stockfish."
+        } else {
+            "Engine found. Ready to analyze."
+        }
+        .into();
         Self {
+            settings: None,
             appearance,
             palette_name: String::new(),
             palette_light: "#F0D9B5".into(),
@@ -122,6 +127,11 @@ pub enum Message {
     LoadFen,
     CopyFen,
     EnginePath(String),
+    OpenSettings,
+    CloseSettings,
+    SettingsTab(SettingsTab),
+    SettingsPath(String),
+    ApplySettings,
     SearchMode(SearchMode),
     SearchLimit(String),
     Analyze,
@@ -195,7 +205,8 @@ impl App {
             }
         };
         if self.engine_path.trim().is_empty() {
-            self.notice = "Stockfish is optional. Enter its executable path to analyze.".into();
+            self.notice =
+                "Stockfish is optional. Open Settings to configure its executable.".into();
             return;
         }
         self.next_request = self.next_request.wrapping_add(1);
@@ -261,7 +272,33 @@ impl App {
         }
     }
     pub fn update(&mut self, message: Message) -> Task<Message> {
+        if self.settings.is_some()
+            && !matches!(
+                &message,
+                Message::OpenSettings
+                    | Message::CloseSettings
+                    | Message::SettingsTab(_)
+                    | Message::SettingsPath(_)
+                    | Message::ApplySettings
+                    | Message::PieceSet(_)
+                    | Message::Palette(_)
+                    | Message::PaletteName(_)
+                    | Message::PaletteLight(_)
+                    | Message::PaletteDark(_)
+                    | Message::SavePalette
+                    | Message::DeletePalette
+                    | Message::Poll
+                    | Message::Key(_)
+            )
+        {
+            return Task::none();
+        }
         match message {
+            Message::OpenSettings
+            | Message::CloseSettings
+            | Message::SettingsTab(_)
+            | Message::SettingsPath(_)
+            | Message::ApplySettings => return self.update_settings(message),
             Message::Panel(tab) => self.panel_tab = tab,
             Message::PieceSet(_)
             | Message::Palette(_)
@@ -381,6 +418,12 @@ impl App {
                 }
             }
             Message::Key(keyboard::Event::KeyPressed { key, modifiers, .. }) => {
+                if self.settings.is_some() {
+                    if key.as_ref() == keyboard::Key::Named(keyboard::key::Named::Escape) {
+                        return self.update(Message::CloseSettings);
+                    }
+                    return Task::none();
+                }
                 if self.review.import_open {
                     if key.as_ref() == keyboard::Key::Named(keyboard::key::Named::Escape) {
                         return self.update(Message::CancelImport);
@@ -455,6 +498,12 @@ impl App {
                         .game
                         .piece_at(square)
                         .is_some_and(|p| p.color == self.game.turn() && p.role == Role::King);
+                if is_legal && self.game.piece_at(square).is_some() {
+                    background = theme::tint(background, theme::INK, 0.20);
+                }
+                if checked {
+                    background = theme::tint(background, iced::Color::from_rgb8(220, 55, 55), 0.65);
+                }
                 let piece: Element<'_, Message> = match self.game.piece_at(square) {
                     Some(p) => iced::widget::svg(iced::widget::svg::Handle::from_memory(
                         self.appearance.piece_set.svg_bytes(p.color, p.role),
@@ -462,9 +511,23 @@ impl App {
                     .width(cell * 0.9)
                     .height(cell * 0.9)
                     .into(),
-                    None => text(if is_legal { "•" } else { "" })
-                        .size(cell * 0.30)
-                        .color(theme::INK)
+                    None => container(iced::widget::Space::new())
+                        .width(cell * 0.20)
+                        .height(cell * 0.20)
+                        .style(move |_| container::Style {
+                            background: is_legal.then_some(
+                                iced::Color {
+                                    a: 0.24,
+                                    ..theme::INK
+                                }
+                                .into(),
+                            ),
+                            border: iced::Border {
+                                radius: (cell * 0.10).into(),
+                                ..Default::default()
+                            },
+                            ..Default::default()
+                        })
                         .into(),
                 };
                 let content = container(piece)
@@ -477,25 +540,15 @@ impl App {
                         .padding(0)
                         .on_press(Message::Square(square))
                         .style(move |_, status| button::Style {
-                            background: Some(background.into()),
+                            background: Some(
+                                if status == button::Status::Hovered {
+                                    theme::tint(background, theme::INK, 0.08)
+                                } else {
+                                    background
+                                }
+                                .into(),
+                            ),
                             text_color: theme::INK,
-                            border: Border {
-                                color: if checked {
-                                    iced::Color::from_rgb8(216, 63, 63)
-                                } else {
-                                    theme::INK
-                                },
-                                width: if checked {
-                                    3.0
-                                } else if is_legal {
-                                    2.0
-                                } else if status == button::Status::Hovered {
-                                    1.0
-                                } else {
-                                    0.0
-                                },
-                                radius: 0.0.into(),
-                            },
                             ..Default::default()
                         }),
                 );
@@ -586,9 +639,6 @@ impl App {
         let panel = column![
             text("LOCAL ANALYSIS").size(12).color(theme::ACCENT),
             text("Stockfish").size(26),
-            text_input("Path to Stockfish executable", &self.engine_path)
-                .on_input(Message::EnginePath)
-                .size(12),
             row![
                 pick_list(
                     [SearchMode::Time, SearchMode::Depth],
@@ -631,7 +681,6 @@ impl App {
     fn panel(&self) -> Element<'_, Message> {
         let analysis = self.panel_tab == PanelTab::Analysis;
         let moves = self.panel_tab == PanelTab::Moves;
-        let appearance = self.panel_tab == PanelTab::Appearance;
         let tabs = row![
             button("Analysis")
                 .on_press(Message::Panel(PanelTab::Analysis))
@@ -647,19 +696,9 @@ impl App {
                 } else {
                     button::text(theme, status)
                 }),
-            button("Style")
-                .on_press(Message::Panel(PanelTab::Appearance))
-                .style(move |theme, status| if appearance {
-                    button::primary(theme, status)
-                } else {
-                    button::text(theme, status)
-                }),
         ]
         .spacing(8);
-        let mut panel = column![tabs].spacing(12);
-        if !appearance {
-            panel = panel.push(self.review_controls());
-        }
+        let mut panel = column![tabs, self.review_controls()].spacing(12);
         if self.promotion.is_some() {
             panel = panel
                 .push(text("Choose promotion").color(theme::ACCENT))
@@ -682,7 +721,6 @@ impl App {
         panel = panel.push(match self.panel_tab {
             PanelTab::Analysis => self.engine_controls(),
             PanelTab::Moves => self.move_list(),
-            PanelTab::Appearance => self.appearance_controls(),
         });
         scrollable(
             container(panel)
@@ -717,7 +755,7 @@ impl App {
             button("Undo").on_press(Message::Undo),
             button("Flip").on_press(Message::Flip),
             button("Import PGN").on_press(Message::OpenImport),
-            button("Appearance").on_press(Message::Panel(PanelTab::Appearance))
+            button("Settings").on_press(Message::OpenSettings)
         ]
         .spacing(8);
         let fen = row![
@@ -754,7 +792,7 @@ impl App {
                 .into()
             }
         });
-        container(
+        let base = container(
             column![
                 header,
                 toolbar,
@@ -773,7 +811,12 @@ impl App {
         .padding(20)
         .width(Length::Fill)
         .height(Length::Fill)
-        .into()
+        .into();
+        if self.settings.is_some() {
+            self.settings_view(base)
+        } else {
+            base
+        }
     }
 }
 #[cfg(test)]

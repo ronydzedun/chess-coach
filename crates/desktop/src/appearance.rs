@@ -226,6 +226,7 @@ impl BoardPalette {
 #[serde(default)]
 pub struct Settings {
     pub piece_set: PieceSet,
+    pub engine_path: Option<String>,
     pub custom_palettes: Vec<BoardPalette>,
     pub selected_palette: String,
 }
@@ -234,6 +235,7 @@ impl Default for Settings {
     fn default() -> Self {
         Self {
             piece_set: PieceSet::default(),
+            engine_path: None,
             custom_palettes: Vec::new(),
             selected_palette: "Classic".into(),
         }
@@ -283,6 +285,13 @@ impl Settings {
     }
 
     pub fn validate(&self) -> Result<(), String> {
+        if self
+            .engine_path
+            .as_ref()
+            .is_some_and(|path| path.is_empty() || path.len() > 4096 || path.contains('\0'))
+        {
+            return Err("Engine path must contain 1–4096 bytes without NUL characters.".into());
+        }
         let mut checked = Self::default();
         for palette in &self.custom_palettes {
             checked.add_palette(palette.clone())?;
@@ -316,24 +325,24 @@ impl Settings {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                 return Ok(Self::default());
             }
-            Err(error) => return Err(format!("Could not read appearance settings: {error}")),
+            Err(error) => return Err(format!("Could not read settings: {error}")),
         };
         let mut bytes = Vec::new();
         file.take(65_537)
             .read_to_end(&mut bytes)
             .map_err(|e| e.to_string())?;
         if bytes.len() > 65_536 {
-            return Err("The appearance settings file is too large.".into());
+            return Err("The settings file is too large.".into());
         }
-        let settings: Self = serde_json::from_slice(&bytes)
-            .map_err(|e| format!("Invalid appearance settings file: {e}"))?;
+        let settings: Self =
+            serde_json::from_slice(&bytes).map_err(|e| format!("Invalid settings file: {e}"))?;
         settings.validate()?;
         Ok(settings)
     }
 
     fn save_to(&self, path: &Path) -> Result<(), String> {
         self.validate()?;
-        let parent = path.parent().ok_or("Invalid appearance settings path.")?;
+        let parent = path.parent().ok_or("Invalid settings path.")?;
         fs::create_dir_all(parent).map_err(|e| e.to_string())?;
         let bytes = serde_json::to_vec_pretty(self).map_err(|e| e.to_string())?;
         // Same-directory replacement keeps the old complete file on write failure.
@@ -376,6 +385,7 @@ mod tests {
         assert_eq!(Settings::load_from(&path).unwrap(), Settings::default());
         let mut settings = Settings {
             piece_set: PieceSet::Celtic,
+            engine_path: Some("/my engine/stockfish".into()),
             ..Settings::default()
         };
         settings
@@ -397,6 +407,16 @@ mod tests {
         assert!(Settings::load_from(&path).is_err());
         fs::write(&path, vec![b' '; 65_537]).unwrap();
         assert!(Settings::load_from(&path).is_err());
+    }
+
+    #[test]
+    fn legacy_settings_keep_appearance_and_default_to_engine_discovery() {
+        let settings: Settings =
+            serde_json::from_str(r#"{"piece_set":"Celtic","selected_palette":"Blue"}"#).unwrap();
+        settings.validate().unwrap();
+        assert_eq!(settings.piece_set, PieceSet::Celtic);
+        assert_eq!(settings.selected_palette, "Blue");
+        assert!(settings.engine_path.is_none());
     }
 
     #[test]
