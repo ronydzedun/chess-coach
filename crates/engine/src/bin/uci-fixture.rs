@@ -2,7 +2,8 @@
 //! Minimal deterministic UCI process used by the engine integration tests.
 use std::io::{self, BufRead, Write};
 fn main() {
-    let executable = std::env::current_exe().unwrap();
+    // Preserve the selected fixture mode when invoked through a symlink.
+    let executable = std::path::PathBuf::from(std::env::args_os().next().unwrap());
     let name = executable.file_name().unwrap().to_string_lossy();
     let mut position = String::new();
     let mut late = false;

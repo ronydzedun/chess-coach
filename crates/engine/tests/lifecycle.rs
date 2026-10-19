@@ -5,6 +5,17 @@ use std::time::{Duration, Instant};
 fn fixture() -> PathBuf {
     env!("CARGO_BIN_EXE_uci-fixture").into()
 }
+fn install_fixture(path: &std::path::Path) {
+    // Unix exec can see ETXTBSY if a concurrent child briefly inherits a copy's
+    // write descriptor. A symlink executes the already-built read-only binary,
+    // even when the test directory is on a separate filesystem.
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(fixture(), path).unwrap();
+    #[cfg(not(unix))]
+    if std::fs::hard_link(fixture(), path).is_err() {
+        std::fs::copy(fixture(), path).unwrap();
+    }
+}
 fn until(engine: &Engine, predicate: impl Fn(&Event) -> bool) -> Event {
     let deadline = Instant::now() + Duration::from_secs(8);
     loop {
@@ -111,7 +122,7 @@ fn cancel_unresponsive_handshake() {
         std::env::temp_dir().join(format!("chess-coach-engine-silent-{}", std::process::id()));
     std::fs::create_dir_all(&directory).unwrap();
     let path = directory.join(format!("silent{}", std::env::consts::EXE_SUFFIX));
-    std::fs::copy(fixture(), &path).unwrap();
+    install_fixture(&path);
     let engine = Engine::new();
     engine.analyze(31, path, "normal".into(), true, Limit::Depth(2));
     std::thread::sleep(Duration::from_millis(50));
@@ -199,11 +210,7 @@ impl FixtureDirectory {
         let path = self
             .0
             .join(format!("{mode}{}", std::env::consts::EXE_SUFFIX));
-        // Reusing the built inode avoids executing a freshly written file on
-        // filesystems that briefly retain a write lease after copy completes.
-        if std::fs::hard_link(fixture(), &path).is_err() {
-            std::fs::copy(fixture(), &path).unwrap();
-        }
+        install_fixture(&path);
         path
     }
     fn position(&self, name: &str, behavior: &str) -> String {
@@ -546,4 +553,36 @@ fn inherited_stdout_does_not_hold_worker_open() {
     let start = Instant::now();
     drop(engine);
     assert!(start.elapsed() < Duration::from_secs(1));
+}
+
+#[test]
+fn watchdog_completion_is_marked_incomplete_and_session_remains_reusable() {
+    let directory = FixtureDirectory::new("watchdog");
+    let engine = Engine::new();
+    engine.analyze(
+        140,
+        fixture(),
+        directory.position("first", "slow"),
+        true,
+        Limit::TimeMs(1),
+    );
+    let event = until(&engine, |event| {
+        matches!(event, Event::BestMove { .. } | Event::Incomplete { .. })
+    });
+    assert_eq!(
+        event,
+        Event::Incomplete {
+            id: 140,
+            best_move: None
+        }
+    );
+    engine.analyze(
+        141,
+        fixture(),
+        directory.position("second", "normal"),
+        true,
+        Limit::Depth(2),
+    );
+    best(&engine, 141);
+    assert_eq!(directory.pid("first"), directory.pid("second"));
 }

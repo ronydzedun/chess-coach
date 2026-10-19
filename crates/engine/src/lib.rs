@@ -72,11 +72,29 @@ pub struct Info {
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Event {
-    Ready { id: u64 },
-    Info { id: u64, info: Info },
-    BestMove { id: u64, best_move: Option<String> },
-    Stopped { id: u64 },
-    Error { id: u64, message: String },
+    Ready {
+        id: u64,
+    },
+    Info {
+        id: u64,
+        info: Info,
+    },
+    BestMove {
+        id: u64,
+        best_move: Option<String>,
+    },
+    /// The service watchdog stopped a search that did not finish by its deadline.
+    Incomplete {
+        id: u64,
+        best_move: Option<String>,
+    },
+    Stopped {
+        id: u64,
+    },
+    Error {
+        id: u64,
+        message: String,
+    },
 }
 
 /// Find an explicitly configured engine, then common Stockfish installations.
@@ -646,9 +664,16 @@ fn run(shared: &Shared, request: &Request, cached: &mut Option<Session>) -> Resu
                 if let Some(best_move) = parse_best_move(&line) {
                     shared.publish(
                         request.token,
-                        Event::BestMove {
-                            id: request.id,
-                            best_move,
+                        if stop_deadline.is_some() {
+                            Event::Incomplete {
+                                id: request.id,
+                                best_move,
+                            }
+                        } else {
+                            Event::BestMove {
+                                id: request.id,
+                                best_move,
+                            }
                         },
                     );
                     // An old search is fully consumed before the next position.

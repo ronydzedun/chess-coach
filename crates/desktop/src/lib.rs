@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+mod analysis_cache;
 pub mod appearance;
 mod appearance_ui;
 mod evaluation;
@@ -56,6 +57,8 @@ pub struct App {
     search_limit: String,
     next_request: u64,
     active: Option<(u64, u64)>,
+    active_key: Option<analysis_cache::Key>,
+    analysis_cache: analysis_cache::Cache,
     analyzing: bool,
     auto_analysis: bool,
     analysis_due: Option<std::time::Instant>,
@@ -100,6 +103,8 @@ impl Default for App {
             search_limit: "1000".into(),
             next_request: 0,
             active: None,
+            active_key: None,
+            analysis_cache: analysis_cache::Cache::default(),
             analyzing: false,
             auto_analysis: true,
             analysis_due: Some(std::time::Instant::now()),
@@ -192,6 +197,9 @@ impl App {
     }
     fn schedule_analysis(&mut self) {
         self.stop_analysis();
+        if self.restore_cached_analysis() {
+            return;
+        }
         if self.auto_analysis {
             self.analysis_due =
                 Some(std::time::Instant::now() + std::time::Duration::from_millis(300));
@@ -201,14 +209,11 @@ impl App {
         self.analysis_due = None;
         self.engine.stop();
         self.active = None;
+        self.active_key = None;
         self.analyzing = false;
         self.engine_status = "Analysis stopped".into();
     }
-    fn start_analysis(&mut self) {
-        self.analysis_due = None;
-        if !self.auto_analysis {
-            return;
-        }
+    fn analysis_key(&self) -> Result<analysis_cache::Key, String> {
         let limit = match self.search_limit.parse::<u32>() {
             Ok(n) if self.search_mode == SearchMode::Time && (1..=300_000).contains(&n) => {
                 engine::Limit::TimeMs(n)
@@ -216,29 +221,60 @@ impl App {
             Ok(n) if self.search_mode == SearchMode::Depth && (1..=128).contains(&n) => {
                 engine::Limit::Depth(n as u8)
             }
-            _ => {
-                self.notice = "Use 1–300000 milliseconds or depth 1–128".into();
+            _ => return Err("Use 1–300000 milliseconds or depth 1–128".into()),
+        };
+        if self.engine_path.trim().is_empty() {
+            return Err("Stockfish is optional. Open Settings to configure its executable.".into());
+        }
+        Ok(analysis_cache::Key {
+            fen: self.game.fen(),
+            engine_path: self.engine_path.trim().into(),
+            options: self.appearance.engine_options(),
+            limit,
+        })
+    }
+    fn restore_cached_analysis(&mut self) -> bool {
+        let Some(result) = self
+            .analysis_key()
+            .ok()
+            .and_then(|key| self.analysis_cache.get(&key))
+        else {
+            return false;
+        };
+        self.info = result.info;
+        self.best_move = result.best_move;
+        self.engine_status = "Cached analysis".into();
+        true
+    }
+    fn start_analysis(&mut self, use_cache: bool) {
+        self.analysis_due = None;
+        if !self.auto_analysis {
+            return;
+        }
+        if use_cache && self.restore_cached_analysis() {
+            return;
+        }
+        let key = match self.analysis_key() {
+            Ok(key) => key,
+            Err(error) => {
+                self.notice = error;
                 return;
             }
         };
-        if self.engine_path.trim().is_empty() {
-            self.notice =
-                "Stockfish is optional. Open Settings to configure its executable.".into();
-            return;
-        }
         self.next_request = self.next_request.wrapping_add(1);
         self.active = Some((self.next_request, self.game.revision()));
+        self.active_key = Some(key.clone());
         self.info = engine::Info::default();
         self.best_move = None;
         self.analyzing = true;
         self.engine_status = "Preparing local analysis…".into();
         self.engine.analyze_with_options(
             self.next_request,
-            self.engine_path.trim().into(),
-            self.game.fen(),
+            key.engine_path.into(),
+            key.fen,
             self.game.turn() == Color::White,
-            limit,
-            self.appearance.engine_options(),
+            key.limit,
+            key.options,
         );
     }
     fn receive(&mut self, event: engine::Event) {
@@ -246,6 +282,7 @@ impl App {
             engine::Event::Ready { id }
             | engine::Event::Info { id, .. }
             | engine::Event::BestMove { id, .. }
+            | engine::Event::Incomplete { id, .. }
             | engine::Event::Stopped { id }
             | engine::Event::Error { id, .. } => *id,
         };
@@ -267,14 +304,35 @@ impl App {
             }
             engine::Event::BestMove { best_move, .. } => {
                 self.best_move = best_move;
+                if let Some(key) = self.active_key.take() {
+                    self.analysis_cache.insert(
+                        key,
+                        analysis_cache::Result {
+                            info: self.info.clone(),
+                            best_move: self.best_move.clone(),
+                        },
+                    );
+                }
+                self.active = None;
                 self.analyzing = false;
                 self.engine_status = "Analysis complete".into();
             }
+            engine::Event::Incomplete { best_move, .. } => {
+                self.best_move = best_move;
+                self.active = None;
+                self.active_key = None;
+                self.analyzing = false;
+                self.engine_status = "Search deadline exceeded · result not cached".into();
+            }
             engine::Event::Stopped { .. } => {
+                self.active = None;
+                self.active_key = None;
                 self.analyzing = false;
                 self.engine_status = "Analysis stopped".into();
             }
             engine::Event::Error { message, .. } => {
+                self.active = None;
+                self.active_key = None;
                 self.analyzing = false;
                 self.engine_status = message;
             }
@@ -409,6 +467,8 @@ impl App {
                 self.schedule_analysis();
             }
             Message::SearchMode(mode) => {
+                self.info = engine::Info::default();
+                self.best_move = None;
                 self.search_mode = mode;
                 self.search_limit = match mode {
                     SearchMode::Time => "1000",
@@ -418,10 +478,15 @@ impl App {
                 self.schedule_analysis();
             }
             Message::SearchLimit(limit) => {
+                self.info = engine::Info::default();
+                self.best_move = None;
                 self.search_limit = limit;
                 self.schedule_analysis();
             }
-            Message::Analyze => self.start_analysis(),
+            Message::Analyze => {
+                self.stop_analysis();
+                self.start_analysis(false);
+            }
             Message::ToggleAnalysis => {
                 self.auto_analysis = !self.auto_analysis;
                 self.schedule_analysis();
@@ -435,7 +500,7 @@ impl App {
                     .analysis_due
                     .is_some_and(|due| std::time::Instant::now() >= due)
                 {
-                    self.start_analysis();
+                    self.start_analysis(true);
                 }
                 while let Some(event) = self.engine.try_recv() {
                     self.receive(event);
@@ -675,12 +740,18 @@ impl App {
                     .size(13)
             ]
             .spacing(6),
-            button(if self.auto_analysis {
-                "Analysis: ON"
-            } else {
-                "Analysis: OFF"
-            })
-            .on_press(Message::ToggleAnalysis),
+            row![
+                button(if self.auto_analysis {
+                    "Analysis: ON"
+                } else {
+                    "Analysis: OFF"
+                })
+                .on_press(Message::ToggleAnalysis),
+                button("Reanalyze")
+                    .on_press_maybe(self.auto_analysis.then_some(Message::Analyze))
+                    .style(button::secondary),
+            ]
+            .spacing(8),
             text(&self.engine_status).size(12).color(theme::MUTED),
             row![
                 text(score).size(32),
@@ -963,6 +1034,136 @@ mod tests {
         let requests = app.next_request;
         send(&mut app, Message::Poll);
         assert_eq!(app.next_request, requests);
+    }
+    fn cache_app() -> App {
+        App {
+            engine_path: "/nonexistent/chess-coach-cache-test-engine".into(),
+            ..App::default()
+        }
+    }
+    fn completed(app: &mut App, id: u64, cp: i32) {
+        app.analysis_due = None;
+        app.analyzing = true;
+        app.active = Some((id, app.game.revision()));
+        app.active_key = Some(app.analysis_key().unwrap());
+        app.info = engine::Info::default();
+        app.receive(engine::Event::Info {
+            id,
+            info: engine::Info {
+                depth: Some(18),
+                score: Some(engine::Score::Cp(cp)),
+                pv: vec!["e2e4".into(), "e7e5".into()],
+            },
+        });
+        app.receive(engine::Event::BestMove {
+            id,
+            best_move: Some(
+                if app.game.turn() == Color::White {
+                    "e2e4"
+                } else {
+                    "e7e5"
+                }
+                .into(),
+            ),
+        });
+    }
+    #[test]
+    fn returning_to_completed_positions_restores_immediately_even_when_off() {
+        let mut app = cache_app();
+        completed(&mut app, 10, 35);
+        send(&mut app, Message::Square(Square::E2));
+        send(&mut app, Message::Square(Square::E4));
+        assert!(app.analysis_due.is_some());
+        assert!(app.info.score.is_none());
+        completed(&mut app, 11, -125);
+        let requests = app.next_request;
+        send(&mut app, Message::Seek(0));
+        assert_eq!(app.info.score, Some(engine::Score::Cp(35)));
+        assert_eq!(app.info.depth, Some(18));
+        assert_eq!(app.best_move.as_deref(), Some("e2e4"));
+        assert!(app.analysis_due.is_none() && app.active.is_none() && !app.analyzing);
+        assert_eq!(app.engine_status, "Cached analysis");
+        send(&mut app, Message::Seek(1));
+        assert_eq!(app.info.score, Some(engine::Score::Cp(-125)));
+        assert_eq!(app.best_move.as_deref(), Some("e7e5"));
+        send(&mut app, Message::ToggleAnalysis);
+        send(&mut app, Message::Undo);
+        assert!(!app.auto_analysis);
+        assert_eq!(app.info.score, Some(engine::Score::Cp(35)));
+        assert!(app.analysis_due.is_none());
+        app.receive(engine::Event::BestMove {
+            id: 11,
+            best_move: Some("a7a8q".into()),
+        });
+        app.receive(engine::Event::Error {
+            id: 10,
+            message: "old failure".into(),
+        });
+        assert_eq!(app.best_move.as_deref(), Some("e2e4"));
+        assert_eq!(app.next_request, requests);
+        assert_eq!(app.engine_status, "Cached analysis");
+    }
+    #[test]
+    fn interrupted_failed_and_stale_searches_do_not_create_results() {
+        let mut app = cache_app();
+        app.active = Some((20, app.game.revision()));
+        app.active_key = Some(app.analysis_key().unwrap());
+        app.receive(engine::Event::Info {
+            id: 20,
+            info: engine::Info {
+                score: Some(engine::Score::Cp(999)),
+                ..Default::default()
+            },
+        });
+        send(&mut app, Message::Square(Square::E2));
+        send(&mut app, Message::Square(Square::E4));
+        app.receive(engine::Event::BestMove {
+            id: 20,
+            best_move: Some("e2e4".into()),
+        });
+        send(&mut app, Message::Undo);
+        assert!(app.info.score.is_none() && app.analysis_due.is_some());
+        assert!(!app.restore_cached_analysis());
+        app.active = Some((22, app.game.revision()));
+        app.active_key = Some(app.analysis_key().unwrap());
+        app.receive(engine::Event::Incomplete {
+            id: 22,
+            best_move: Some("e2e4".into()),
+        });
+        assert!(!app.restore_cached_analysis());
+        assert!(app.active_key.is_none());
+        app.active = Some((21, app.game.revision()));
+        app.active_key = Some(app.analysis_key().unwrap());
+        app.receive(engine::Event::Error {
+            id: 21,
+            message: "failed".into(),
+        });
+        assert!(!app.restore_cached_analysis());
+    }
+    #[test]
+    fn cache_respects_settings_and_manual_reanalysis_bypasses_it() {
+        let mut app = cache_app();
+        completed(&mut app, 30, 70);
+        send(&mut app, Message::SearchLimit("2000".into()));
+        assert!(app.info.score.is_none() && app.analysis_due.is_some());
+        send(&mut app, Message::SearchLimit("1000".into()));
+        assert_eq!(app.info.score, Some(engine::Score::Cp(70)));
+        assert!(app.analysis_due.is_none());
+        let old_path = app.engine_path.clone();
+        send(
+            &mut app,
+            Message::EnginePath("/another/missing-engine".into()),
+        );
+        assert!(app.info.score.is_none() && app.analysis_due.is_some());
+        send(&mut app, Message::EnginePath(old_path));
+        assert_eq!(app.info.score, Some(engine::Score::Cp(70)));
+        let requests = app.next_request;
+        send(&mut app, Message::Analyze);
+        assert_eq!(app.next_request, requests + 1);
+        assert!(app.analyzing && app.active_key.is_some());
+        assert!(app.info.score.is_none());
+        send(&mut app, Message::Stop);
+        assert!(app.active_key.is_none());
     }
     #[test]
     fn promotion_waits_for_choice() {

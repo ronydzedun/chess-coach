@@ -60,6 +60,8 @@ Click a piece, then its destination. Ctrl/Cmd+O opens PGN import, Ctrl/Cmd+N sta
 
 Stockfish stays running between related position searches, retaining its cache. Changing engine settings restarts it and releases the previous allocation. Turning analysis OFF stops the search while keeping the idle process/cache for reuse; closing the app terminates it. More threads can increase search work within the time limit, but do not make a 1000 ms search return immediately. Speedups depend on position and hardware. See [Stockfish's settings guidance](https://official-stockfish.github.io/docs/stockfish-wiki/Stockfish-FAQ.html#optimal-settings).
 
+Completed analyses are also cached by the application in memory (up to 256 results, least recently used entries evicted first). Returning to a position through the move list, undo, or review navigation immediately restores its score, depth, best move and PV without starting a new search, including when automatic analysis is OFF. The cache key includes the complete FEN, engine executable path, Threads/Hash and the exact depth/time limit. **Reanalyze**, or Enter in the limit field while analysis is ON, explicitly bypasses the cache. Canceled, failed and watchdog-stopped searches do not populate it. This cache is cleared when the app exits; it is separate from Stockfish's internal Hash.
+
 ## Validation and platform status
 
 ```sh
