@@ -14,8 +14,8 @@ pub use settings_ui::SettingsTab;
 pub mod theme;
 use chess_core::{Color, Game, Role, Square};
 use iced::widget::{
-    Column, Row, button, column, container, pick_list, responsive, row, scrollable, text,
-    text_editor, text_input,
+    Column, Row, button, column, container, pick_list, progress_bar, responsive, row, scrollable,
+    text, text_editor, text_input,
 };
 use iced::{Alignment, Element, Length, Subscription, Task, keyboard};
 pub use review::GameChoice;
@@ -977,12 +977,29 @@ impl App {
                 .into()
             }
         });
+        let mut status = Column::new().spacing(6);
+        if let Some(batch) = &self.game_analysis {
+            let (completed, _, total) = batch.progress();
+            let percent = completed * 100 / total.max(1);
+            status = status
+                .push(
+                    row![
+                        text(batch.status(self.auto_analysis))
+                            .size(12)
+                            .width(Length::Fill),
+                        text(format!("{percent}%")).size(12).color(theme::ACCENT),
+                    ]
+                    .spacing(12),
+                )
+                .push(progress_bar(0.0..=total.max(1) as f32, completed as f32).girth(6));
+        }
         let base = container(
             column![
                 header,
                 toolbar,
                 fen,
                 body,
+                status,
                 text(if self.appearance_status.starts_with("Using default") {
                     format!("{} · {}", self.notice, self.appearance_status)
                 } else {

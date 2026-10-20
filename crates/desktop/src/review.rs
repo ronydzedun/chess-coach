@@ -217,13 +217,6 @@ impl App {
                 );
             }
         }
-        if let Some(batch) = &self.game_analysis {
-            content = content.push(
-                text(batch.status(self.auto_analysis))
-                    .size(12)
-                    .color(theme::MUTED),
-            );
-        }
         content
             .push(
                 row![

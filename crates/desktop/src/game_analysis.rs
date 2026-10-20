@@ -132,9 +132,15 @@ impl GameAnalysis {
             self.positions.iter().position(|p| p.fen == current_fen),
         )
     }
+    pub fn progress(&self) -> (usize, usize, usize) {
+        (
+            self.positions.iter().filter(|p| p.result.is_some()).count(),
+            self.positions.iter().filter(|p| p.failed).count(),
+            self.positions.len(),
+        )
+    }
     pub fn status(&self, enabled: bool) -> String {
-        let completed = self.positions.iter().filter(|p| p.result.is_some()).count();
-        let failed = self.positions.iter().filter(|p| p.failed).count();
+        let (completed, failed, _) = self.progress();
         let state = if self.error.is_some() {
             "error"
         } else if completed + failed == self.positions.len() {
@@ -724,6 +730,45 @@ mod tests {
         batch.positions[2].result = None;
         assert_eq!(batch.report_data("different working branch").0[2], None);
         assert_eq!(batch.report_data("different working branch").1, None);
+    }
+    #[test]
+    fn progress_counts_only_completed_positions_and_keeps_pause_error_and_gaps_visible() {
+        let mut app = app();
+        assert_eq!(app.game_analysis.as_ref().unwrap().progress(), (0, 0, 4));
+        complete_current(&mut app, 35);
+        assert_eq!(app.game_analysis.as_ref().unwrap().progress(), (1, 0, 4));
+        assert!(
+            app.game_analysis
+                .as_ref()
+                .unwrap()
+                .status(false)
+                .contains("paused")
+        );
+        app.start_background_analysis();
+        let id = app.background.as_ref().unwrap().id;
+        app.receive(engine::Event::Incomplete {
+            id,
+            best_move: None,
+        });
+        assert_eq!(app.game_analysis.as_ref().unwrap().progress(), (1, 1, 4));
+        app.pause_game_analysis_error("fixture failure".into());
+        assert!(
+            app.game_analysis
+                .as_ref()
+                .unwrap()
+                .status(true)
+                .contains("fixture failure")
+        );
+        app.resume_game_analysis();
+        for cp in [40, 50, 60] {
+            app.start_background_analysis();
+            finish_background(&mut app, cp);
+        }
+        let batch = app.game_analysis.as_ref().unwrap();
+        assert_eq!(batch.progress(), (4, 0, 4));
+        assert!(batch.status(true).contains("finished"));
+        send(&mut app, Message::SearchLimit("2000".into()));
+        assert_eq!(app.game_analysis.as_ref().unwrap().progress(), (0, 0, 4));
     }
     #[test]
     fn setup_fen_preserves_side_and_position_count_is_bounded_by_line() {
