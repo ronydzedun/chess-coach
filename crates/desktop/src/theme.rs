@@ -20,3 +20,12 @@ pub fn theme(_: &crate::App) -> Theme {
         },
     )
 }
+
+/// Blend square highlights without adding outlines or obscuring pieces.
+pub fn tint(base: Color, overlay: Color, amount: f32) -> Color {
+    Color::from_rgb(
+        base.r * (1.0 - amount) + overlay.r * amount,
+        base.g * (1.0 - amount) + overlay.g * amount,
+        base.b * (1.0 - amount) + overlay.b * amount,
+    )
+}

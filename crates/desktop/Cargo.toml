@@ -10,6 +10,12 @@ name = "chess-coach"
 path = "src/main.rs"
 
 [dependencies]
+chess-library = { path = "../library" }
 chess-core = { path = "../chess-core" }
 engine = { path = "../engine" }
 iced.workspace = true
+rfd = "0.17.2"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+directories = "6.0.0"
+tempfile = "3.27.0"

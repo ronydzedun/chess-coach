@@ -5,3 +5,7 @@ allow = [
   "GPL-3.0-or-later", "MIT", "Apache-2.0", "BSD-2-Clause", "BSD-3-Clause",
   "BSL-1.0", "ISC", "Zlib", "Unicode-3.0", "Unlicense",
 ]
+
+# directories -> option-ext: MPL 2.0 source reviewed; no Exhibit B incompatibility notice.
+# See docs/LICENSING.md for GPL combination and distribution obligations.
+exceptions = [{ allow = ["MPL-2.0"], crate = "option-ext@0.2.0" }]

@@ -35,7 +35,9 @@ jobs:
         if: runner.os == 'Linux'
         env:
           STOCKFISH_EXECUTABLE: /usr/games/stockfish
-        run: cargo test -p engine --locked -- --nocapture
+        run: |
+          cargo test -p engine --locked -- --nocapture
+          cargo test -p desktop --locked long_game_stockfish_opt_in -- --nocapture
   licenses:
     runs-on: ubuntu-latest
     steps:

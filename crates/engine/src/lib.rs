@@ -13,6 +13,33 @@ pub const PROTOCOL: &str = "UCI";
 const HANDSHAKE: Duration = Duration::from_secs(5);
 const POLL: Duration = Duration::from_millis(10);
 const MAX_EVENTS: usize = 128;
+const STOP_TIMEOUT: Duration = Duration::from_secs(1);
+
+/// Resource limits for a local engine. Hash is measured in MiB.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct EngineOptions {
+    pub threads: u16,
+    pub hash_mib: u32,
+}
+impl Default for EngineOptions {
+    fn default() -> Self {
+        Self {
+            threads: 1,
+            hash_mib: 16,
+        }
+    }
+}
+impl EngineOptions {
+    pub fn validate(self) -> Result<(), String> {
+        if !(1..=1024).contains(&self.threads) {
+            return Err("Threads must be between 1 and 1024".into());
+        }
+        if !(1..=4096).contains(&self.hash_mib) {
+            return Err("Hash must be between 1 and 4096 MiB".into());
+        }
+        Ok(())
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Limit {
@@ -23,6 +50,45 @@ pub enum Limit {
 pub enum Score {
     Cp(i32),
     Mate(i32),
+}
+/// UCI score bounds, expressed in the same perspective as the score.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Bound {
+    #[default]
+    Exact,
+    Lower,
+    Upper,
+}
+impl Bound {
+    pub fn white_perspective(self, white_to_move: bool) -> Self {
+        match (white_to_move, self) {
+            (false, Self::Lower) => Self::Upper,
+            (false, Self::Upper) => Self::Lower,
+            _ => self,
+        }
+    }
+}
+/// A root position and the played continuation, retaining repetition history.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Position {
+    pub fen: String,
+    pub moves: Vec<String>,
+}
+impl Position {
+    fn command(&self) -> Result<String, String> {
+        if self.fen.is_empty() || self.fen.len() > 1024 || self.fen.chars().any(char::is_control) {
+            return Err("Invalid FEN command".into());
+        }
+        if self.moves.len() > 2048 || self.moves.iter().any(|value| !is_move(value)) {
+            return Err("Invalid position move history (maximum 2048 UCI moves)".into());
+        }
+        let mut command = format!("position fen {}", self.fen);
+        if !self.moves.is_empty() {
+            command.push_str(" moves ");
+            command.push_str(&self.moves.join(" "));
+        }
+        Ok(command)
+    }
 }
 impl Score {
     /// Convert the engine's side-to-move score to White's perspective.
@@ -41,15 +107,34 @@ impl Score {
 pub struct Info {
     pub depth: Option<u32>,
     pub score: Option<Score>,
+    pub bound: Bound,
     pub pv: Vec<String>,
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Event {
-    Ready { id: u64 },
-    Info { id: u64, info: Info },
-    BestMove { id: u64, best_move: Option<String> },
-    Stopped { id: u64 },
-    Error { id: u64, message: String },
+    Ready {
+        id: u64,
+    },
+    Info {
+        id: u64,
+        info: Info,
+    },
+    BestMove {
+        id: u64,
+        best_move: Option<String>,
+    },
+    /// The service watchdog stopped a search that did not finish by its deadline.
+    Incomplete {
+        id: u64,
+        best_move: Option<String>,
+    },
+    Stopped {
+        id: u64,
+    },
+    Error {
+        id: u64,
+        message: String,
+    },
 }
 
 /// Find an explicitly configured engine, then common Stockfish installations.
@@ -70,19 +155,92 @@ pub fn discover() -> Option<PathBuf> {
     path.is_file().then_some(path)
 }
 
+/// Stable metadata identity for the executable selected for a search. Bare
+/// names include their resolved absolute PATH location; explicit paths retain
+/// the versioned byte length and signed modification nanoseconds format.
+pub fn executable_identity(path: &Path) -> String {
+    capture_executable(path).1
+}
+
+fn metadata_identity(path: &Path) -> String {
+    let Ok(metadata) = std::fs::metadata(path) else {
+        return "v1:unavailable".into();
+    };
+    let modified = match metadata.modified() {
+        Ok(time) => match time.duration_since(std::time::UNIX_EPOCH) {
+            Ok(duration) => format!("+{}", duration.as_nanos()),
+            Err(error) => format!("-{}", error.duration().as_nanos()),
+        },
+        Err(_) => "unknown".into(),
+    };
+    format!("v1:{}:{modified}", metadata.len())
+}
+
+fn capture_executable(path: &Path) -> (Option<PathBuf>, String) {
+    let directories: Vec<_> =
+        std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()).collect();
+    capture_executable_in(path, &directories)
+}
+
+fn capture_executable_in(path: &Path, directories: &[PathBuf]) -> (Option<PathBuf>, String) {
+    let mut components = path.components();
+    let bare = matches!(components.next(), Some(std::path::Component::Normal(_)))
+        && components.next().is_none();
+    if !bare {
+        return (Some(path.to_owned()), metadata_identity(path));
+    }
+    for directory in directories {
+        let candidate = directory.join(path);
+        #[cfg(windows)]
+        let candidate = if candidate.extension().is_none() {
+            candidate.with_extension("exe")
+        } else {
+            candidate
+        };
+        if !candidate.is_file() {
+            continue;
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStrExt;
+            let Ok(name) = std::ffi::CString::new(candidate.as_os_str().as_bytes()) else {
+                continue;
+            };
+            // SAFETY: name is a live, NUL-terminated path. access only checks
+            // executability and does not mutate the file or retain the pointer.
+            if unsafe { libc::access(name.as_ptr(), libc::X_OK) } != 0 {
+                continue;
+            }
+        }
+        if let Ok(resolved) = std::path::absolute(&candidate) {
+            let identity = format!(
+                "v1:path:{:?}:{}",
+                resolved.as_os_str(),
+                metadata_identity(&resolved)
+            );
+            return (Some(resolved), identity);
+        }
+    }
+    (None, format!("v1:path:{:?}:unavailable", path.as_os_str()))
+}
+
 struct Request {
     token: u64,
     id: u64,
     path: PathBuf,
-    fen: String,
+    resolved_path: Option<PathBuf>,
+    executable_identity: String,
+    position: Position,
     white_to_move: bool,
     limit: Limit,
+    options: EngineOptions,
 }
 #[derive(Default)]
 struct Shared {
     token: AtomicU64,
     id: AtomicU64,
     shutdown: AtomicBool,
+    reset: AtomicU64,
     pending: Mutex<Option<Request>>,
     wake: Condvar,
     events: Mutex<VecDeque<(u64, Event)>>,
@@ -126,21 +284,36 @@ impl Engine {
         let shared = Arc::new(Shared::default());
         let state = shared.clone();
         let worker = thread::spawn(move || {
+            let mut session: Option<Session> = None;
+            let mut reset = 0;
             loop {
                 let request = {
                     let mut pending = state.pending.lock().unwrap();
-                    while pending.is_none() && !state.shutdown.load(Ordering::Acquire) {
-                        pending = state.wake.wait(pending).unwrap();
+                    if pending.is_none() && !state.shutdown.load(Ordering::Acquire) {
+                        pending = state.wake.wait_timeout(pending, POLL).unwrap().0;
                     }
-                    if state.shutdown.load(Ordering::Acquire) {
-                        break;
-                    }
-                    pending.take().unwrap()
+                    pending.take()
                 };
+                if state.shutdown.load(Ordering::Acquire) {
+                    break;
+                }
+                let generation = state.reset.load(Ordering::Acquire);
+                if generation != reset {
+                    session = None;
+                    reset = generation;
+                }
+                if let Some(current) = session.as_mut() {
+                    // Keep unsolicited idle output bounded and notice exited engines.
+                    current.process.drain();
+                    if !current.process.alive() {
+                        session = None;
+                    }
+                }
+                let Some(request) = request else { continue };
                 if state.cancelled(request.token) {
                     continue;
                 }
-                if let Err(message) = run(&state, &request) {
+                if let Err(message) = run(&state, &request, &mut session) {
                     state.publish(
                         request.token,
                         Event::Error {
@@ -157,6 +330,46 @@ impl Engine {
         }
     }
     pub fn analyze(&self, id: u64, path: PathBuf, fen: String, white_to_move: bool, limit: Limit) {
+        self.analyze_with_options(
+            id,
+            path,
+            fen,
+            white_to_move,
+            limit,
+            EngineOptions::default(),
+        );
+    }
+    pub fn analyze_with_options(
+        &self,
+        id: u64,
+        path: PathBuf,
+        fen: String,
+        white_to_move: bool,
+        limit: Limit,
+        options: EngineOptions,
+    ) {
+        self.analyze_position_with_options(
+            id,
+            path,
+            Position {
+                fen,
+                moves: Vec::new(),
+            },
+            white_to_move,
+            limit,
+            options,
+        );
+    }
+    pub fn analyze_position_with_options(
+        &self,
+        id: u64,
+        path: PathBuf,
+        position: Position,
+        white_to_move: bool,
+        limit: Limit,
+        options: EngineOptions,
+    ) {
+        let (resolved_path, executable_identity) = capture_executable(&path);
         let mut pending = self.shared.pending.lock().unwrap();
         let token = self.shared.token.fetch_add(1, Ordering::AcqRel) + 1;
         self.shared.id.store(id, Ordering::Release);
@@ -165,9 +378,12 @@ impl Engine {
             token,
             id,
             path,
-            fen,
+            resolved_path,
+            executable_identity,
+            position,
             white_to_move,
             limit,
+            options,
         });
         self.shared.wake.notify_one();
     }
@@ -175,6 +391,7 @@ impl Engine {
         let mut pending = self.shared.pending.lock().unwrap();
         let token = self.shared.token.fetch_add(1, Ordering::AcqRel) + 1;
         *pending = None;
+        self.shared.wake.notify_one();
         self.shared.events.lock().unwrap().clear();
         self.shared.publish(
             token,
@@ -182,6 +399,16 @@ impl Engine {
                 id: self.shared.id.load(Ordering::Acquire),
             },
         );
+    }
+    /// Cancel analysis and release the process, including an idle hash table.
+    /// The worker performs cleanup asynchronously; the next request starts fresh.
+    pub fn reset(&self) {
+        let mut pending = self.shared.pending.lock().unwrap();
+        self.shared.token.fetch_add(1, Ordering::AcqRel);
+        self.shared.reset.fetch_add(1, Ordering::AcqRel);
+        *pending = None;
+        self.shared.events.lock().unwrap().clear();
+        self.shared.wake.notify_one();
     }
     pub fn try_recv(&self) -> Option<Event> {
         let mut events = self.shared.events.lock().unwrap();
@@ -305,7 +532,8 @@ impl Process {
                             let critical = matches!(
                                 value.split_whitespace().next(),
                                 Some("uciok" | "readyok" | "bestmove")
-                            );
+                            ) || value.starts_with("option name Threads ")
+                                || value.starts_with("option name Hash ");
                             loop {
                                 if stop.load(Ordering::Acquire) {
                                     return;
@@ -344,10 +572,28 @@ impl Process {
             .and_then(|()| self.input.flush())
             .map_err(|e| format!("Engine input failed: {e}"))
     }
-    fn wait_for(&mut self, shared: &Shared, token: u64, expected: &str) -> Result<bool, String> {
-        let deadline = Instant::now() + HANDSHAKE;
+    fn alive(&mut self) -> bool {
+        matches!(self.child.try_wait(), Ok(None))
+    }
+    fn drain(&self) {
+        for _ in 0..128 {
+            if self.lines.try_recv().is_err() {
+                break;
+            }
+        }
+    }
+    fn wait_for(
+        &mut self,
+        shared: &Shared,
+        token: Option<u64>,
+        expected: &str,
+        timeout: Duration,
+    ) -> Result<bool, String> {
+        let deadline = Instant::now() + timeout;
         while Instant::now() < deadline {
-            if shared.cancelled(token) {
+            if shared.shutdown.load(Ordering::Acquire)
+                || token.is_some_and(|token| shared.cancelled(token))
+            {
                 return Ok(false);
             }
             match self.lines.recv_timeout(POLL) {
@@ -355,8 +601,38 @@ impl Process {
                 Ok(_) | Err(mpsc::RecvTimeoutError::Timeout) => {}
                 Err(_) => return Err(format!("Engine exited before {expected}")),
             }
+            if !self.alive() {
+                return Err(format!("Engine exited before {expected}"));
+            }
         }
         Err(format!("Engine timed out waiting for {expected}"))
+    }
+    fn handshake(&mut self, shared: &Shared, request: &Request) -> Result<bool, String> {
+        self.send("uci")?;
+        let deadline = Instant::now() + HANDSHAKE;
+        let mut options = AdvertisedOptions::default();
+        loop {
+            if shared.cancelled(request.token) {
+                return Ok(false);
+            }
+            if Instant::now() >= deadline {
+                return Err("Engine timed out waiting for uciok".into());
+            }
+            match self.lines.recv_timeout(POLL) {
+                Ok(line) if line == "uciok" => break,
+                Ok(line) => options.parse(&line)?,
+                Err(mpsc::RecvTimeoutError::Timeout) if self.alive() => {}
+                Err(_) => return Err("Engine exited before uciok".into()),
+            }
+        }
+        // Validate both options before changing either, then allocate Hash last.
+        let threads = options.command("Threads", u32::from(request.options.threads), 1)?;
+        let hash = options.command("Hash", request.options.hash_mib, 16)?;
+        for command in [threads, hash].into_iter().flatten() {
+            self.send(&command)?;
+        }
+        self.send("isready")?;
+        self.wait_for(shared, Some(request.token), "readyok", HANDSHAKE)
     }
 }
 impl Drop for Process {
@@ -382,21 +658,118 @@ impl Drop for Process {
     }
 }
 
-fn run(shared: &Shared, request: &Request) -> Result<(), String> {
-    if request.fen.len() > 1024 || request.fen.contains(['\n', '\r']) {
-        return Err("Invalid FEN command".into());
+#[derive(Clone, Copy)]
+struct Spin {
+    min: u32,
+    max: u32,
+}
+#[derive(Default)]
+struct AdvertisedOptions {
+    threads: Option<Spin>,
+    hash: Option<Spin>,
+}
+impl AdvertisedOptions {
+    fn parse(&mut self, line: &str) -> Result<(), String> {
+        let words: Vec<_> = line.split_whitespace().collect();
+        if words.len() < 3 || words[..2] != ["option", "name"] {
+            return Ok(());
+        }
+        let target = match words[2] {
+            "Threads" => &mut self.threads,
+            "Hash" => &mut self.hash,
+            _ => return Ok(()),
+        };
+        let bound = |key| {
+            words
+                .windows(2)
+                .find(|pair| pair[0] == key)
+                .and_then(|pair| pair[1].parse::<u32>().ok())
+        };
+        let min = bound("min");
+        let max = bound("max");
+        if words.get(3..5) != Some(&["type", "spin"])
+            || min.zip(max).is_none_or(|(min, max)| min > max)
+        {
+            return Err(format!(
+                "Engine advertises invalid {} spin option",
+                words[2]
+            ));
+        }
+        *target = Some(Spin {
+            min: min.unwrap(),
+            max: max.unwrap(),
+        });
+        Ok(())
     }
-    let mut process = Process::spawn(&request.path)?;
-    process.send("uci")?;
-    if !process.wait_for(shared, request.token, "uciok")? {
-        return Ok(());
+    fn command(&self, name: &str, value: u32, legacy: u32) -> Result<Option<String>, String> {
+        let bounds = if name == "Threads" {
+            self.threads
+        } else {
+            self.hash
+        };
+        match bounds {
+            Some(bounds) if (bounds.min..=bounds.max).contains(&value) => {
+                Ok(Some(format!("setoption name {name} value {value}")))
+            }
+            Some(bounds) => Err(format!(
+                "Engine {name} supports {}..={}, requested {value}",
+                bounds.min, bounds.max
+            )),
+            None if value == legacy => Ok(None),
+            None => Err(format!(
+                "Engine does not advertise {name}; cannot apply {value}"
+            )),
+        }
     }
+}
+struct Session {
+    process: Process,
+    path: PathBuf,
+    executable_identity: String,
+    options: EngineOptions,
+}
+fn run(shared: &Shared, request: &Request, cached: &mut Option<Session>) -> Result<(), String> {
+    request.options.validate()?;
+    let position_command = request.position.command()?;
+    let path = request
+        .resolved_path
+        .as_deref()
+        .ok_or("Cannot find engine executable on PATH")?;
+    if cached.as_mut().is_some_and(|session| {
+        session.path != request.path
+            || session.executable_identity != request.executable_identity
+            || session.options != request.options
+            || !session.process.alive()
+    }) {
+        *cached = None;
+    }
+    let mut session = match cached.take() {
+        Some(session) => session,
+        None => {
+            let mut process = Process::spawn(path)?;
+            if !process.handshake(shared, request)? {
+                return Ok(());
+            }
+            Session {
+                process,
+                path: request.path.clone(),
+                executable_identity: request.executable_identity.clone(),
+                options: request.options,
+            }
+        }
+    };
+    let process = &mut session.process;
+    process.drain();
     process.send("isready")?;
-    if !process.wait_for(shared, request.token, "readyok")? {
+    if !process.wait_for(shared, Some(request.token), "readyok", HANDSHAKE)? {
         return Ok(());
     }
     shared.publish(request.token, Event::Ready { id: request.id });
-    process.send(&format!("position fen {}", request.fen))?;
+    if shared.cancelled(request.token) {
+        *cached = Some(session);
+        return Ok(());
+    }
+    process.send(&position_command)?;
     let (command, duration) = match request.limit {
         Limit::Depth(depth) => (
             format!("go depth {}", depth.clamp(1, 128)),
@@ -414,12 +787,14 @@ fn run(shared: &Shared, request: &Request) -> Result<(), String> {
     let deadline = Instant::now() + duration;
     let mut stop_deadline = None;
     loop {
-        if shared.cancelled(request.token) {
+        if shared.shutdown.load(Ordering::Acquire) {
             return Ok(());
         }
-        if Instant::now() >= deadline && stop_deadline.is_none() {
+        if (shared.cancelled(request.token) || Instant::now() >= deadline)
+            && stop_deadline.is_none()
+        {
             process.send("stop")?;
-            stop_deadline = Some(Instant::now() + Duration::from_secs(1));
+            stop_deadline = Some(Instant::now() + STOP_TIMEOUT);
         }
         if stop_deadline.is_some_and(|deadline| Instant::now() >= deadline) {
             return Err("Engine did not finish after stop".into());
@@ -429,17 +804,31 @@ fn run(shared: &Shared, request: &Request) -> Result<(), String> {
                 if let Some(best_move) = parse_best_move(&line) {
                     shared.publish(
                         request.token,
-                        Event::BestMove {
-                            id: request.id,
-                            best_move,
+                        if stop_deadline.is_some() {
+                            Event::Incomplete {
+                                id: request.id,
+                                best_move,
+                            }
+                        } else {
+                            Event::BestMove {
+                                id: request.id,
+                                best_move,
+                            }
                         },
                     );
+                    // An old search is fully consumed before the next position.
+                    // Ignore replacement tokens during this short cleanup barrier.
+                    process.send("isready")?;
+                    if process.wait_for(shared, None, "readyok", STOP_TIMEOUT)? {
+                        *cached = Some(session);
+                    }
                     return Ok(());
                 }
                 if let Some(mut info) = parse_info(&line) {
                     info.score = info
                         .score
                         .map(|score| score.white_perspective(request.white_to_move));
+                    info.bound = info.bound.white_perspective(request.white_to_move);
                     shared.publish(
                         request.token,
                         Event::Info {
@@ -449,11 +838,12 @@ fn run(shared: &Shared, request: &Request) -> Result<(), String> {
                     );
                 }
             }
-            Err(mpsc::RecvTimeoutError::Timeout) => {}
+            Err(mpsc::RecvTimeoutError::Timeout) if process.alive() => {}
             Err(_) => return Err("Engine exited during analysis".into()),
         }
     }
 }
+
 fn is_move(value: &str) -> bool {
     let b = value.as_bytes();
     (b.len() == 4 || b.len() == 5)
@@ -501,6 +891,8 @@ fn parse_info(line: &str) -> Option<Info> {
                     .collect();
                 break;
             }
+            "lowerbound" => info.bound = Bound::Lower,
+            "upperbound" => info.bound = Bound::Upper,
             _ => {}
         }
     }
@@ -510,6 +902,71 @@ fn parse_info(line: &str) -> Option<Info> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn executable_resolution_uses_supplied_path_order_and_keeps_explicit_paths() {
+        let directory =
+            std::env::temp_dir().join(format!("chess-engine-resolution-{}", std::process::id()));
+        let first = directory.join("first");
+        let second = directory.join("second");
+        std::fs::create_dir_all(&first).unwrap();
+        std::fs::create_dir_all(&second).unwrap();
+        let name = format!("engine{}", std::env::consts::EXE_SUFFIX);
+        for parent in [&first, &second] {
+            let path = parent.join(&name);
+            std::fs::write(&path, b"fixture").unwrap();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+            }
+            std::fs::File::options()
+                .write(true)
+                .open(path)
+                .unwrap()
+                .set_modified(std::time::UNIX_EPOCH + Duration::from_secs(10))
+                .unwrap();
+        }
+        let (a, a_identity) =
+            capture_executable_in(Path::new(&name), &[first.clone(), second.clone()]);
+        let (b, b_identity) =
+            capture_executable_in(Path::new(&name), &[second.clone(), first.clone()]);
+        assert_eq!(a, Some(first.join(&name)));
+        assert_eq!(b, Some(second.join(&name)));
+        assert_ne!(
+            a_identity, b_identity,
+            "PATH location matters even with identical metadata"
+        );
+        assert_eq!(
+            metadata_identity(a.as_ref().unwrap()),
+            metadata_identity(b.as_ref().unwrap())
+        );
+        let explicit = first.join(&name);
+        assert_eq!(
+            capture_executable_in(&explicit, &[]),
+            (Some(explicit.clone()), metadata_identity(&explicit))
+        );
+        assert!(
+            capture_executable_in(Path::new("missing-engine"), std::slice::from_ref(&first))
+                .0
+                .is_none()
+        );
+        #[cfg(windows)]
+        assert_eq!(
+            capture_executable_in(Path::new("engine"), std::slice::from_ref(&first)).0,
+            Some(first.join(&name))
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(first.join(&name), std::fs::Permissions::from_mode(0o644))
+                .unwrap();
+            assert_eq!(
+                capture_executable_in(Path::new(&name), &[first, second.clone()]).0,
+                Some(second.join(&name))
+            );
+        }
+        std::fs::remove_dir_all(directory).unwrap();
+    }
     #[test]
     fn scores_and_parser() {
         assert_eq!(Score::Cp(20).white_perspective(false), Score::Cp(-20));
@@ -523,6 +980,7 @@ mod tests {
             Info {
                 depth: Some(12),
                 score: Some(Score::Cp(-25)),
+                bound: Bound::Exact,
                 pv: vec!["e2e4".into(), "e7e5".into()]
             }
         );
@@ -540,5 +998,61 @@ mod tests {
         assert_eq!(parse_best_move("bestmove 0000"), Some(None));
         assert!(parse_best_move("bestmove a9a8").is_none());
         assert!(parse_best_move("bestmove").is_none());
+    }
+    #[test]
+    fn score_bounds_and_perspective() {
+        for (token, bound, flipped) in [
+            ("", Bound::Exact, Bound::Exact),
+            ("lowerbound", Bound::Lower, Bound::Upper),
+            ("upperbound", Bound::Upper, Bound::Lower),
+        ] {
+            for score in ["cp -25", "mate 4"] {
+                let info =
+                    parse_info(&format!("info depth 12 score {score} {token} pv e2e4")).unwrap();
+                assert_eq!(info.bound, bound);
+                assert_eq!(info.bound.white_perspective(true), bound);
+                assert_eq!(info.bound.white_perspective(false), flipped);
+            }
+        }
+    }
+    #[test]
+    fn history_command_is_bounded_and_rejects_injection() {
+        let position = Position {
+            fen: "8/8/8/8/8/8/4K3/7k w - - 0 1".into(),
+            moves: vec!["e2e3".into(), "h1h2".into()],
+        };
+        assert_eq!(
+            position.command().unwrap(),
+            "position fen 8/8/8/8/8/8/4K3/7k w - - 0 1 moves e2e3 h1h2"
+        );
+        for value in [
+            "e2e4\nquit",
+            "e2e4 e7e5",
+            "e2e4\r",
+            "0000",
+            "a7a8k",
+            "i1a1",
+            "e2e9",
+        ] {
+            let mut bad = position.clone();
+            bad.moves = vec![value.into()];
+            assert!(bad.command().is_err(), "{value:?}");
+        }
+        let mut many = position.clone();
+        many.moves = vec!["e2e3".into(); 2048];
+        assert!(many.command().is_ok());
+        many.moves.push("h1h2".into());
+        assert!(many.command().is_err());
+        for value in [
+            "normal\nquit",
+            "normal\rquit",
+            "normal\0quit",
+            "normal\tquit",
+            "",
+        ] {
+            let mut bad = position.clone();
+            bad.fen = value.into();
+            assert!(bad.command().is_err());
+        }
     }
 }
