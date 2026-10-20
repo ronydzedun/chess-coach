@@ -15,6 +15,7 @@ Direct libraries were checked against published crate manifests and source:
 | serde | 1.0.229 | MIT OR Apache-2.0 | 1.56 |
 | serde_json | 1.0.154 | MIT OR Apache-2.0 | 1.71 |
 | directories | 6.0.0 | MIT OR Apache-2.0 | not declared |
+| rusqlite | 0.40.2 | MIT | not declared in published manifest; compiled with Rust 1.99.1 |
 | tempfile | 3.27.0 | MIT OR Apache-2.0 | 1.63 |
 | libc (Unix engine pipe polling) | see Cargo.lock | MIT OR Apache-2.0 | see crate manifest |
 | windows-sys (Windows pipe polling) | see Cargo.lock | MIT OR Apache-2.0 | see crate manifest |
@@ -25,6 +26,8 @@ The application pins Rust 1.99.1. [DEPENDENCIES.md](DEPENDENCIES.md) inventories
 cargo install cargo-deny --version 0.20.2 --locked
 cargo deny --locked check licenses
 ```
+
+`rusqlite` is used with its `bundled` feature, which builds SQLite from the `libsqlite3-sys 0.38.2` source dependency rather than relying on a system SQLite library. SQLite itself is public domain; rusqlite and the bundled binding carry their own MIT notices. The application stores its local game library using SQLite; see [third-party notices](../THIRD_PARTY_NOTICES.md).
 
 Permissive alternatives are available for dependencies declaring alternative licenses. For example, the allow-list accepts Apache-2.0 for a dependency offering `Apache-2.0 OR GPL-2.0-only`; it does not accept GPL-2.0-only by itself. The [FSF license list](https://www.gnu.org/licenses/license-list.html#apache2) discusses Apache-2.0 compatibility with GPLv3. The `option-ext` exception is limited to the crate actually pulled in by `directories`. The reviewed source has no Exhibit B notice identifying an incompatible secondary license. MPL-2.0 permits a larger work to be distributed under other terms while MPL-covered files remain under MPL; for binary distribution, retain notices and make the corresponding source for covered files available. Mozilla discusses MPL/GPL combinations in [FAQ question 14](https://www.mozilla.org/en-US/MPL/2.0/FAQ/#using-and-distributing-software-under-the-license). Review the specific combination and distribution method before shipping binaries. This repository's source check does not establish that all future combinations or distributions comply.
 

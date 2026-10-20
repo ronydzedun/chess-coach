@@ -10,6 +10,7 @@ name = "chess-coach"
 path = "src/main.rs"
 
 [dependencies]
+chess-library = { path = "../library" }
 chess-core = { path = "../chess-core" }
 engine = { path = "../engine" }
 iced.workspace = true

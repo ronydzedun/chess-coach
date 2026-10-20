@@ -9,6 +9,8 @@ use std::sync::Arc;
 pub struct ImportedPgn {
     pub games: Arc<Vec<PgnGame>>,
     pub source: String,
+    pub text: String,
+    pub library_ids: Vec<i64>,
 }
 
 async fn background<T: Send + 'static>(
@@ -31,6 +33,8 @@ pub async fn pasted(text: String) -> Result<ImportedPgn, String> {
         Ok(ImportedPgn {
             games: Arc::new(parse_pgn(text.as_bytes())?),
             source: "Pasted PGN".into(),
+            text,
+            library_ids: Vec::new(),
         })
     })
     .await
@@ -63,6 +67,8 @@ fn read_file(path: PathBuf) -> Result<ImportedPgn, String> {
     Ok(ImportedPgn {
         games: Arc::new(games),
         source,
+        text: String::from_utf8(bytes).map_err(|e| e.to_string())?,
+        library_ids: Vec::new(),
     })
 }
 

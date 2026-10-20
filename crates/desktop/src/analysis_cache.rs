@@ -7,14 +7,20 @@ pub(super) const CAPACITY: usize = 256;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct Key {
     pub fen: String,
+    pub position: engine::Position,
     pub engine_path: String,
+    pub engine_identity: String,
     pub options: engine::EngineOptions,
     pub limit: engine::Limit,
 }
 impl Key {
     // Resource allocation changes execution, not the requested analysis criterion.
     pub fn same_analysis(&self, other: &Self) -> bool {
-        self.fen == other.fen && self.engine_path == other.engine_path && self.limit == other.limit
+        self.fen == other.fen
+            && self.position == other.position
+            && self.engine_path == other.engine_path
+            && self.engine_identity == other.engine_identity
+            && self.limit == other.limit
     }
 }
 #[derive(Debug, Clone)]
@@ -58,7 +64,12 @@ mod tests {
     fn key(fen: &str) -> Key {
         Key {
             fen: fen.into(),
+            position: engine::Position {
+                fen: fen.into(),
+                moves: Vec::new(),
+            },
             engine_path: "stockfish".into(),
+            engine_identity: "fixture".into(),
             options: engine::EngineOptions::default(),
             limit: engine::Limit::TimeMs(1000),
         }

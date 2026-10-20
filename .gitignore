@@ -2,3 +2,11 @@
 *.swp
 *.swo
 .DS_Store
+
+# Local game libraries and SQLite journals may contain private PGNs.
+*.sqlite
+*.sqlite3
+*.sqlite-wal
+*.sqlite-shm
+*.sqlite3-wal
+*.sqlite3-shm

@@ -72,6 +72,8 @@ Expressions are publisher declarations; see [licensing review](LICENSING.md) and
 | [error-code](https://docs.rs/crate/error-code/3.4.0/source/) | 3.4.0 | BSL-1.0 |
 | [etagere](https://docs.rs/crate/etagere/0.2.15/source/) | 0.2.15 | MIT/Apache-2.0 |
 | [euclid](https://docs.rs/crate/euclid/0.22.14/source/) | 0.22.14 | MIT OR Apache-2.0 |
+| [fallible-iterator](https://docs.rs/crate/fallible-iterator/0.3.0/source/) | 0.3.0 | MIT/Apache-2.0 |
+| [fallible-streaming-iterator](https://docs.rs/crate/fallible-streaming-iterator/0.1.9/source/) | 0.1.9 | MIT/Apache-2.0 |
 | [fastrand](https://docs.rs/crate/fastrand/2.5.0/source/) | 2.5.0 | Apache-2.0 OR MIT |
 | [fdeflate](https://docs.rs/crate/fdeflate/0.3.7/source/) | 0.3.7 | MIT OR Apache-2.0 |
 | [find-msvc-tools](https://docs.rs/crate/find-msvc-tools/0.1.15/source/) | 0.1.15 | MIT OR Apache-2.0 |
@@ -104,6 +106,7 @@ Expressions are publisher declarations; see [licensing review](LICENSING.md) and
 | [harfrust](https://docs.rs/crate/harfrust/0.3.2/source/) | 0.3.2 | MIT |
 | [hashbrown](https://docs.rs/crate/hashbrown/0.16.1/source/) | 0.16.1 | MIT OR Apache-2.0 |
 | [hashbrown](https://docs.rs/crate/hashbrown/0.17.1/source/) | 0.17.1 | MIT OR Apache-2.0 |
+| [hashlink](https://docs.rs/crate/hashlink/0.12.2/source/) | 0.12.2 | MIT OR Apache-2.0 |
 | [hermit-abi](https://docs.rs/crate/hermit-abi/0.5.3/source/) | 0.5.3 | MIT OR Apache-2.0 |
 | [hexf-parse](https://docs.rs/crate/hexf-parse/0.2.1/source/) | 0.2.1 | CC0-1.0 |
 | [iced](https://docs.rs/crate/iced/0.14.0/source/) | 0.14.0 | MIT |
@@ -135,6 +138,7 @@ Expressions are publisher declarations; see [licensing review](LICENSING.md) and
 | [libloading](https://docs.rs/crate/libloading/0.8.9/source/) | 0.8.9 | ISC |
 | [libm](https://docs.rs/crate/libm/0.2.16/source/) | 0.2.16 | MIT |
 | [libredox](https://docs.rs/crate/libredox/0.1.25/source/) | 0.1.25 | MIT |
+| [libsqlite3-sys](https://docs.rs/crate/libsqlite3-sys/0.38.2/source/) | 0.38.2 | MIT |
 | [lilt](https://docs.rs/crate/lilt/0.8.2/source/) | 0.8.2 | MIT |
 | [linebender_resource_handle](https://docs.rs/crate/linebender_resource_handle/0.1.1/source/) | 0.1.1 | Apache-2.0 OR MIT |
 | [linux-raw-sys](https://docs.rs/crate/linux-raw-sys/0.12.1/source/) | 0.12.1 | Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT |
@@ -220,6 +224,8 @@ Expressions are publisher declarations; see [licensing review](LICENSING.md) and
 | [rfd](https://docs.rs/crate/rfd/0.17.2/source/) | 0.17.2 | MIT |
 | [rgb](https://docs.rs/crate/rgb/0.8.53/source/) | 0.8.53 | MIT |
 | [roxmltree](https://docs.rs/crate/roxmltree/0.20.0/source/) | 0.20.0 | MIT OR Apache-2.0 |
+| [rsqlite-vfs](https://docs.rs/crate/rsqlite-vfs/0.1.1/source/) | 0.1.1 | MIT |
+| [rusqlite](https://docs.rs/crate/rusqlite/0.40.2/source/) | 0.40.2 | MIT |
 | [rustc-hash](https://docs.rs/crate/rustc-hash/1.1.0/source/) | 1.1.0 | Apache-2.0/MIT |
 | [rustc-hash](https://docs.rs/crate/rustc-hash/2.1.3/source/) | 2.1.3 | Apache-2.0 OR MIT |
 | [rustc_version](https://docs.rs/crate/rustc_version/0.4.1/source/) | 0.4.1 | MIT OR Apache-2.0 |
@@ -254,6 +260,7 @@ Expressions are publisher declarations; see [licensing review](LICENSING.md) and
 | [smithay-clipboard](https://docs.rs/crate/smithay-clipboard/0.7.3/source/) | 0.7.3 | MIT |
 | [smol_str](https://docs.rs/crate/smol_str/0.2.2/source/) | 0.2.2 | MIT OR Apache-2.0 |
 | [softbuffer](https://docs.rs/crate/softbuffer/0.4.8/source/) | 0.4.8 | MIT OR Apache-2.0 |
+| [sqlite-wasm-rs](https://docs.rs/crate/sqlite-wasm-rs/0.5.5/source/) | 0.5.5 | MIT |
 | [static_assertions](https://docs.rs/crate/static_assertions/1.1.0/source/) | 1.1.0 | MIT OR Apache-2.0 |
 | [strict-num](https://docs.rs/crate/strict-num/0.1.1/source/) | 0.1.1 | MIT |
 | [svg_fmt](https://docs.rs/crate/svg_fmt/0.4.5/source/) | 0.4.5 | MIT/Apache-2.0 |
@@ -290,6 +297,7 @@ Expressions are publisher declarations; see [licensing review](LICENSING.md) and
 | [unicode-vo](https://docs.rs/crate/unicode-vo/0.1.0/source/) | 0.1.0 | MIT/Apache-2.0 |
 | [unicode-width](https://docs.rs/crate/unicode-width/0.2.2/source/) | 0.2.2 | MIT OR Apache-2.0 |
 | [usvg](https://docs.rs/crate/usvg/0.45.1/source/) | 0.45.1 | Apache-2.0 OR MIT |
+| [vcpkg](https://docs.rs/crate/vcpkg/0.2.15/source/) | 0.2.15 | MIT/Apache-2.0 |
 | [version_check](https://docs.rs/crate/version_check/0.9.5/source/) | 0.9.5 | MIT/Apache-2.0 |
 | [walkdir](https://docs.rs/crate/walkdir/2.5.0/source/) | 2.5.0 | Unlicense/MIT |
 | [wasip2](https://docs.rs/crate/wasip2/1.0.4+wasi-0.2.12/source/) | 1.0.4+wasi-0.2.12 | Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT |

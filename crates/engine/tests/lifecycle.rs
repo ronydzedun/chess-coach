@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-use engine::{Engine, Event, Limit, Score};
+use engine::{Bound, Engine, EngineOptions, Event, Limit, Position, Score};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 fn fixture() -> PathBuf {
@@ -585,4 +585,296 @@ fn watchdog_completion_is_marked_incomplete_and_session_remains_reusable() {
     );
     best(&engine, 141);
     assert_eq!(directory.pid("first"), directory.pid("second"));
+}
+
+#[test]
+fn history_is_sent_from_root_without_resetting_the_session() {
+    let directory = FixtureDirectory::new("history");
+    let path = directory.executable("audit");
+    let engine = Engine::new();
+    let root = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
+    let moves: Vec<String> = ["g1f3", "g8f6", "f3g1", "f6g8"]
+        .into_iter()
+        .map(str::to_owned)
+        .collect();
+    for id in [150, 151] {
+        engine.analyze_position_with_options(
+            id,
+            path.clone(),
+            Position {
+                fen: root.into(),
+                moves: moves.clone(),
+            },
+            true,
+            Limit::Depth(2),
+            EngineOptions::default(),
+        );
+        best(&engine, id);
+    }
+    drop(engine);
+    let commands = std::fs::read_to_string(path.with_extension("commands")).unwrap();
+    let expected = format!("position fen {root} moves {}", moves.join(" "));
+    assert_eq!(commands.lines().filter(|line| *line == expected).count(), 2);
+    assert_eq!(commands.lines().filter(|line| *line == "uci").count(), 1);
+    assert!(!commands.contains("ucinewgame"));
+}
+
+#[test]
+fn executable_identity_is_stable_and_tracks_length_and_modified_time() {
+    let directory = FixtureDirectory::new("identity");
+    let path = directory.0.join("file");
+    assert_eq!(engine::executable_identity(&path), "v1:unavailable");
+    std::fs::write(&path, b"first").unwrap();
+    let file = std::fs::File::options().write(true).open(&path).unwrap();
+    file.set_modified(std::time::UNIX_EPOCH + Duration::from_secs(100))
+        .unwrap();
+    assert_eq!(engine::executable_identity(&path), "v1:5:+100000000000");
+    assert_eq!(
+        engine::executable_identity(&path),
+        engine::executable_identity(&path)
+    );
+    file.set_modified(std::time::UNIX_EPOCH + Duration::from_secs(101))
+        .unwrap();
+    assert_eq!(engine::executable_identity(&path), "v1:5:+101000000000");
+    file.set_len(6).unwrap();
+    assert!(engine::executable_identity(&path).starts_with("v1:6:"));
+}
+
+#[cfg(unix)]
+#[test]
+fn replacing_executable_at_the_same_path_restarts_the_process() {
+    let directory = FixtureDirectory::new("replace-executable");
+    let path = directory.executable("audit");
+    let engine = Engine::new();
+    engine.analyze(
+        152,
+        path.clone(),
+        directory.position("first", "normal"),
+        true,
+        Limit::Depth(2),
+    );
+    best(&engine, 152);
+    let before = engine::executable_identity(&path);
+    let replacement = directory.0.join("replacement");
+    std::fs::copy(fixture(), &replacement).unwrap();
+    // Distinguish the replacement's metadata while retaining the executable's
+    // complete contents and leaving the original build artifact untouched.
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(&replacement)
+        .unwrap()
+        .set_modified(std::time::UNIX_EPOCH + Duration::from_secs(1))
+        .unwrap();
+    std::fs::remove_file(&path).unwrap();
+    std::os::unix::fs::symlink(&replacement, &path).unwrap();
+    assert_ne!(before, engine::executable_identity(&path));
+    engine.analyze(
+        153,
+        path.clone(),
+        directory.position("second", "normal"),
+        true,
+        Limit::Depth(2),
+    );
+    best(&engine, 153);
+    assert_ne!(directory.pid("first"), directory.pid("second"));
+    gone(&directory.pid("first"));
+    drop(engine);
+    let commands = std::fs::read_to_string(path.with_extension("commands")).unwrap();
+    assert_eq!(commands.lines().filter(|line| *line == "uci").count(), 2);
+}
+
+#[cfg(unix)]
+#[test]
+fn bare_engine_name_tracks_replacements_without_mutating_global_path() {
+    const CHILD_DIRECTORY: &str = "CHESS_COACH_BARE_ENGINE_TEST_DIRECTORY";
+    if let Some(directory) = std::env::var_os(CHILD_DIRECTORY) {
+        let directory = FixtureDirectory(PathBuf::from(directory));
+        let installed = directory.executable("audit-bare-engine");
+        let bare = PathBuf::from("audit-bare-engine");
+        let engine = Engine::new();
+        let before = engine::executable_identity(&bare);
+        assert!(before.contains("v1:path:"));
+        assert!(!before.contains("unavailable"));
+        engine.analyze(
+            154,
+            bare.clone(),
+            directory.position("first", "normal"),
+            true,
+            Limit::Depth(2),
+        );
+        best(&engine, 154);
+        let replacement = directory.0.join("replacement");
+        std::fs::copy(fixture(), &replacement).unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(&replacement)
+            .unwrap()
+            .set_modified(std::time::UNIX_EPOCH + Duration::from_secs(1))
+            .unwrap();
+        std::fs::remove_file(&installed).unwrap();
+        std::os::unix::fs::symlink(replacement, &installed).unwrap();
+        assert_ne!(before, engine::executable_identity(&bare));
+        engine.analyze(
+            155,
+            bare,
+            directory.position("second", "normal"),
+            true,
+            Limit::Depth(2),
+        );
+        best(&engine, 155);
+        assert_ne!(directory.pid("first"), directory.pid("second"));
+        gone(&directory.pid("first"));
+        return;
+    }
+    // A separate test process receives the custom PATH. Parallel tests and the
+    // parent process retain their complete original environment.
+    let directory = FixtureDirectory::new("bare-executable");
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "bare_engine_name_tracks_replacements_without_mutating_global_path",
+            "--nocapture",
+        ])
+        .env("PATH", &directory.0)
+        .env(CHILD_DIRECTORY, &directory.0)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn invalid_history_does_not_reach_process_and_valid_request_recovers() {
+    let directory = FixtureDirectory::new("injection");
+    let path = directory.executable("audit");
+    let engine = Engine::new();
+    for (index, value) in ["e2e4\nquit", "e2e4 e7e5", "e7e8k"].into_iter().enumerate() {
+        let id = 160 + index as u64;
+        engine.analyze_position_with_options(
+            id,
+            path.clone(),
+            Position {
+                fen: "normal".into(),
+                moves: vec![value.into()],
+            },
+            true,
+            Limit::Depth(2),
+            EngineOptions::default(),
+        );
+        until(
+            &engine,
+            |event| matches!(event, Event::Error { id: actual, .. } if *actual == id),
+        );
+    }
+    assert!(!path.with_extension("commands").exists());
+    engine.analyze(170, path.clone(), "normal".into(), true, Limit::Depth(2));
+    best(&engine, 170);
+    drop(engine);
+    let commands = std::fs::read_to_string(path.with_extension("commands")).unwrap();
+    assert!(!commands.contains("go infinite"));
+    assert_eq!(commands.lines().filter(|line| *line == "quit").count(), 1);
+}
+
+#[test]
+fn process_bounds_follow_white_score_perspective() {
+    let directory = FixtureDirectory::new("bounds");
+    for (name, white, expected) in [
+        ("lowerbound", true, Bound::Lower),
+        ("lowerbound", false, Bound::Upper),
+        ("upperbound", true, Bound::Upper),
+        ("upperbound", false, Bound::Lower),
+    ] {
+        let path = directory
+            .0
+            .join(format!("{name}-{white}{}", std::env::consts::EXE_SUFFIX));
+        install_fixture(&path);
+        let engine = Engine::new();
+        engine.analyze(180, path, "normal".into(), white, Limit::Depth(2));
+        let event = until(&engine, |event| {
+            matches!(event, Event::Info { id: 180, .. })
+        });
+        let Event::Info { info, .. } = event else {
+            unreachable!()
+        };
+        assert_eq!(info.bound, expected);
+        assert_eq!(info.score, Some(Score::Cp(if white { 42 } else { -42 })));
+        best(&engine, 180);
+    }
+}
+
+#[test]
+fn stockfish_history_recognizes_repetition_from_a_setup_fen() {
+    let Some(path) = std::env::var_os("STOCKFISH_EXECUTABLE") else {
+        eprintln!("SKIP real Stockfish history: set STOCKFISH_EXECUTABLE to opt in");
+        return;
+    };
+    let engine = Engine::new();
+    let path = PathBuf::from(path);
+    let root = "6nk/8/8/8/8/8/8/KQ4N1 w - - 0 1";
+    let history = Position {
+        fen: root.into(),
+        moves: ["g1f3", "g8f6", "f3g1", "f6g8", "g1f3", "g8f6", "f3g1"]
+            .into_iter()
+            .map(str::to_owned)
+            .collect(),
+    };
+    // Black can repeat f6g8 for a draw despite White's extra queen. The same
+    // board without the played history is winning for White.
+    let board_only = Position {
+        fen: "7k/8/5n2/8/8/8/8/KQ4N1 b - - 7 4".into(),
+        moves: Vec::new(),
+    };
+    let mut results = Vec::new();
+    for (id, position) in [(190, history), (191, board_only)] {
+        engine.analyze_position_with_options(
+            id,
+            path.clone(),
+            position,
+            false,
+            Limit::Depth(10),
+            EngineOptions::default(),
+        );
+        let deadline = Instant::now() + Duration::from_secs(8);
+        let mut score = None;
+        loop {
+            if let Some(event) = engine.try_recv() {
+                match event {
+                    Event::Info { id: actual, info }
+                        if actual == id && info.bound == Bound::Exact =>
+                    {
+                        if let Some(value) = info.score {
+                            score = Some(value);
+                        }
+                    }
+                    Event::BestMove {
+                        id: actual,
+                        best_move,
+                    } if actual == id => {
+                        assert!(best_move.is_some());
+                        if id == 190 {
+                            assert_eq!(best_move.as_deref(), Some("f6g8"));
+                        }
+                        results.push(score.expect("Stockfish produced an exact score"));
+                        break;
+                    }
+                    Event::Error { message, .. } => panic!("{message}"),
+                    _ => {}
+                }
+            }
+            assert!(
+                Instant::now() < deadline,
+                "Stockfish history search timed out"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+    assert_eq!(results[0], Score::Cp(0));
+    assert!(
+        matches!(results[1], Score::Cp(n) if n > 200)
+            || matches!(results[1], Score::Mate(n) if n > 0)
+    );
 }

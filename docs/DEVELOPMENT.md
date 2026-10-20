@@ -43,11 +43,15 @@ Install `cargo-deny 0.20.2` and run `cargo deny --locked check licenses` when de
 
 Moves use click-to-move: select a piece, then select a legal destination. Press Escape to clear the current selection or cancel a pending promotion. Keyboard shortcuts are Ctrl/Cmd+O for PGN import, Ctrl/Cmd+N for a new game, Ctrl/Cmd+Z to undo, and Ctrl/Cmd+F to flip the board. Submit FEN with Enter or the Load FEN button; Copy places the current FEN on the system clipboard.
 
-PGN review accepts pasted text or a selected file. File reading and parsing happen in a background worker. An import is atomic and bounded to 8 MiB, 256 games, 2,048 plies per game, and 50,000 plies total; a failed or cancelled import leaves the current board intact. It validates standard-chess main lines, SAN, `SetUp`/`FEN`, and game results. It accepts UTF-8 with an optional BOM, comments, and NAGs; it rejects unsupported variants and malformed or illegal moves. Navigation keys Left/Right/Home/End work when focus is outside the text editor. Undo retains the forward working line until a new move branches it; the original imported line remains available to reload. Source PGN is not changed, and imported data is not persisted.
+PGN review accepts pasted text or a selected file. File reading and parsing happen in a background worker. An import is atomic and bounded to 8 MiB, 256 games, 2,048 plies per game, and 50,000 plies total; a failed or cancelled import leaves the current board intact. It validates standard-chess main lines, SAN, `SetUp`/`FEN`, and game results. It accepts UTF-8 with an optional BOM, comments, and NAGs; it rejects unsupported variants and malformed or illegal moves. Navigation keys Left/Right/Home/End work when focus is outside the text editor. Undo retains the forward working line until a new move branches it; the original imported line remains available to reload. Source PGN is not changed.
+
+The original PGN text and game IDs are stored in the local SQLite library. Identical PGN text deduplicates against the existing import. The database connection lives on a dedicated worker thread. Completed imported-game analyses are stored by game, exact position/history and engine configuration, and loaded at startup; pending work resumes automatically. The active original game and cursor are restored. Exploratory working branches and provisional graph previews are not persisted. The database is stored at `ProjectDirs("org", "chess-coach", "chess-coach").data_local_dir()/library.sqlite3`; on Linux this is normally `~/.local/share/chess-coach/library.sqlite3`, subject to `XDG_DATA_HOME`. SQLite WAL may leave `-wal` and `-shm` files beside it, so close the app before copying the database for backup. Unrecognized, newer or corrupt databases report an error and are preserved without destructive automatic migration.
 
 Successful import selects the Moves tab; Analysis opens the engine controls for the current position. Tab changes do not invalidate analysis. Supplied check/mate SAN suffixes must match the board (omitted suffixes are accepted). Explicit results cannot contradict a checkmate or stalemate; `*` remains valid for analysis positions.
 
-The current review scope does not include variation review or editing, comment display, PGN export, persistence, graphs, training, or AI coaching.
+When the requested limit is above 200 ms or depth 8, game analysis first runs a quick pass at 200 ms or depth 8, then analyzes every position at the requested limit. The current position is prioritized; large evaluation swings and mate changes from the preview are prioritized in the second pass. The report graph can show provisional preview values, which final results replace. The progress percentage counts both work units per position in two-pass mode and reports quick-pass progress separately.
+
+The current review scope does not include variation review or editing, comment display, PGN export, graph-based move classification, training, or AI coaching.
 
 ## PGN UI smoke check
 
@@ -59,7 +63,7 @@ The current review scope does not include variation review or editing, comment d
 
 ## Platform status
 
-The app has been launched on Debian 13 under native Wayland with Hyprland, and a mouse-driven `e2` to `e4` move was exercised. Full-workspace `cargo check --all-targets` passed for Windows GNU and macOS Darwin targets. CI checks native builds, tests, Clippy and formatting on the Linux, Windows and macOS runners; consult the [current CI results](https://github.com/ronydzedun/chess-coach/actions/workflows/ci.yml) for the revision being tested. Graphical runtime on Windows/macOS remains unverified.
+The app has been launched on Debian 13 under native Wayland with Hyprland, and a mouse-driven `e2` to `e4` move was exercised. The SQLite library milestone was exercised on Debian 13 via X11/Xvfb: two imports and their completed scores survived restart without new engine searches; an interrupted third import resumed remaining work, and time/depth preferences plus cursor were restored. CI checks native builds, tests, Clippy and formatting on the Linux, Windows and macOS runners; consult the [current CI results](https://github.com/ronydzedun/chess-coach/actions/workflows/ci.yml) for the revision being tested. Graphical runtime on Windows/macOS remains unverified.
 
 ## GUI responsiveness checks
 

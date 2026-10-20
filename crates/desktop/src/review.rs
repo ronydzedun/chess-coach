@@ -18,6 +18,7 @@ impl std::fmt::Display for GameChoice {
 #[derive(Default)]
 pub(super) struct Review {
     games: Arc<Vec<PgnGame>>,
+    ids: Vec<Option<i64>>,
     choices: Vec<GameChoice>,
     selected: Option<GameChoice>,
     source: String,
@@ -29,6 +30,52 @@ pub(super) struct Review {
     pending: Option<u64>,
 }
 impl Review {
+    pub(super) fn is_modified(&self) -> bool {
+        self.modified
+    }
+    pub(super) fn library_id(&self) -> Option<i64> {
+        self.selected
+            .as_ref()
+            .and_then(|c| self.ids.get(c.index).copied().flatten())
+    }
+    pub(super) fn index_for_id(&self, id: i64) -> Option<usize> {
+        self.ids.iter().position(|i| *i == Some(id))
+    }
+    pub(super) fn append(&mut self, loaded: import::ImportedPgn) -> usize {
+        let mut first = None;
+        let mut games = self.games.as_ref().clone();
+        for (ordinal, pgn) in loaded.games.iter().enumerate() {
+            let id = loaded.library_ids.get(ordinal).copied();
+            if let Some(index) = id.and_then(|id| self.index_for_id(id)) {
+                first.get_or_insert(index);
+                continue;
+            }
+            let index = games.len();
+            first.get_or_insert(index);
+            let tag = |key: &str| {
+                pgn.tags
+                    .get(key)
+                    .map(|s| s.chars().take(32).collect::<String>())
+                    .unwrap_or_else(|| "?".into())
+            };
+            self.choices.push(GameChoice {
+                index,
+                label: format!(
+                    "{}. {} · {} — {} ({})",
+                    index + 1,
+                    loaded.source,
+                    tag("White"),
+                    tag("Black"),
+                    pgn.result
+                ),
+            });
+            games.push(pgn.clone());
+            self.ids.push(id);
+        }
+        self.games = Arc::new(games);
+        self.source = "Local game library".into();
+        first.unwrap_or(0)
+    }
     pub(super) fn detach(&mut self) {
         self.selected = None;
         self.modified = false;
@@ -97,35 +144,15 @@ impl App {
                 self.review.pending = None;
                 match result {
                     Ok(Some(loaded)) if !loaded.games.is_empty() => {
-                        let choices = loaded
-                            .games
-                            .iter()
-                            .enumerate()
-                            .map(|(index, pgn)| {
-                                let tag = |key: &str| {
-                                    pgn.tags
-                                        .get(key)
-                                        .map(|s| s.chars().take(32).collect::<String>())
-                                        .unwrap_or_else(|| "?".into())
-                                };
-                                GameChoice {
-                                    index,
-                                    label: format!(
-                                        "{}. {} — {} ({})",
-                                        index + 1,
-                                        tag("White"),
-                                        tag("Black"),
-                                        pgn.result
-                                    ),
-                                }
-                            })
-                            .collect();
-                        self.review.games = loaded.games;
-                        self.review.source = loaded.source;
-                        self.review.choices = choices;
+                        if loaded.library_ids.is_empty() && self.library.is_some() {
+                            self.review.pending = Some(id);
+                            self.save_import(id, loaded);
+                            return Task::none();
+                        }
+                        let index = self.review.append(loaded);
                         self.review.import_open = false;
                         self.panel_tab = crate::PanelTab::Moves;
-                        self.select_game(0);
+                        self.select_game(index);
                         self.notice = format!(
                             "Imported {} game(s). Select moves to review; original PGN is unchanged.",
                             self.review.games.len()
@@ -163,12 +190,17 @@ impl App {
             let _ = self.update(Message::Seek(ply));
         }
     }
+    pub(super) fn select_library_game(&mut self, index: usize, ply: usize) {
+        self.select_game(index);
+        let _ = self.update(Message::Seek(ply));
+    }
     fn select_game(&mut self, index: usize) {
         let games = Arc::clone(&self.review.games);
         let Some(pgn) = games.get(index) else {
             self.notice = "Imported game is unavailable".into();
             return;
         };
+        self.library_pending = None;
         self.stop_analysis();
         self.engine.reset();
         self.game.load_line(&pgn.game);
@@ -179,6 +211,8 @@ impl App {
         if self.auto_analysis && self.analysis_due.is_some() {
             self.analysis_due = Some(std::time::Instant::now());
         }
+        self.load_saved_analysis();
+        self.save_cursor();
         self.notice = format!("Game {} · starting position", index + 1);
     }
     pub(super) fn review_controls(&self) -> Element<'_, Message> {
@@ -272,6 +306,8 @@ mod tests {
         import::ImportedPgn {
             games: Arc::new(parse_pgn(text.as_bytes()).unwrap()),
             source: "Fixture".into(),
+            text: text.into(),
+            library_ids: Vec::new(),
         }
     }
     fn apply(app: &mut App, text: &str) {
@@ -432,7 +468,7 @@ mod tests {
                 .as_ref()
                 .unwrap()
                 .status(true)
-                .contains("0/2 positions")
+                .contains("1/2 positions")
         );
         assert_eq!(app.game.line()[0].uci, "d2d4");
         app.start_background_analysis();

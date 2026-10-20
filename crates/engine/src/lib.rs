@@ -51,6 +51,45 @@ pub enum Score {
     Cp(i32),
     Mate(i32),
 }
+/// UCI score bounds, expressed in the same perspective as the score.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Bound {
+    #[default]
+    Exact,
+    Lower,
+    Upper,
+}
+impl Bound {
+    pub fn white_perspective(self, white_to_move: bool) -> Self {
+        match (white_to_move, self) {
+            (false, Self::Lower) => Self::Upper,
+            (false, Self::Upper) => Self::Lower,
+            _ => self,
+        }
+    }
+}
+/// A root position and the played continuation, retaining repetition history.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Position {
+    pub fen: String,
+    pub moves: Vec<String>,
+}
+impl Position {
+    fn command(&self) -> Result<String, String> {
+        if self.fen.is_empty() || self.fen.len() > 1024 || self.fen.chars().any(char::is_control) {
+            return Err("Invalid FEN command".into());
+        }
+        if self.moves.len() > 2048 || self.moves.iter().any(|value| !is_move(value)) {
+            return Err("Invalid position move history (maximum 2048 UCI moves)".into());
+        }
+        let mut command = format!("position fen {}", self.fen);
+        if !self.moves.is_empty() {
+            command.push_str(" moves ");
+            command.push_str(&self.moves.join(" "));
+        }
+        Ok(command)
+    }
+}
 impl Score {
     /// Convert the engine's side-to-move score to White's perspective.
     pub fn white_perspective(self, white_to_move: bool) -> Self {
@@ -68,6 +107,7 @@ impl Score {
 pub struct Info {
     pub depth: Option<u32>,
     pub score: Option<Score>,
+    pub bound: Bound,
     pub pv: Vec<String>,
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -115,11 +155,82 @@ pub fn discover() -> Option<PathBuf> {
     path.is_file().then_some(path)
 }
 
+/// Stable metadata identity for the executable selected for a search. Bare
+/// names include their resolved absolute PATH location; explicit paths retain
+/// the versioned byte length and signed modification nanoseconds format.
+pub fn executable_identity(path: &Path) -> String {
+    capture_executable(path).1
+}
+
+fn metadata_identity(path: &Path) -> String {
+    let Ok(metadata) = std::fs::metadata(path) else {
+        return "v1:unavailable".into();
+    };
+    let modified = match metadata.modified() {
+        Ok(time) => match time.duration_since(std::time::UNIX_EPOCH) {
+            Ok(duration) => format!("+{}", duration.as_nanos()),
+            Err(error) => format!("-{}", error.duration().as_nanos()),
+        },
+        Err(_) => "unknown".into(),
+    };
+    format!("v1:{}:{modified}", metadata.len())
+}
+
+fn capture_executable(path: &Path) -> (Option<PathBuf>, String) {
+    let directories: Vec<_> =
+        std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()).collect();
+    capture_executable_in(path, &directories)
+}
+
+fn capture_executable_in(path: &Path, directories: &[PathBuf]) -> (Option<PathBuf>, String) {
+    let mut components = path.components();
+    let bare = matches!(components.next(), Some(std::path::Component::Normal(_)))
+        && components.next().is_none();
+    if !bare {
+        return (Some(path.to_owned()), metadata_identity(path));
+    }
+    for directory in directories {
+        let candidate = directory.join(path);
+        #[cfg(windows)]
+        let candidate = if candidate.extension().is_none() {
+            candidate.with_extension("exe")
+        } else {
+            candidate
+        };
+        if !candidate.is_file() {
+            continue;
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStrExt;
+            let Ok(name) = std::ffi::CString::new(candidate.as_os_str().as_bytes()) else {
+                continue;
+            };
+            // SAFETY: name is a live, NUL-terminated path. access only checks
+            // executability and does not mutate the file or retain the pointer.
+            if unsafe { libc::access(name.as_ptr(), libc::X_OK) } != 0 {
+                continue;
+            }
+        }
+        if let Ok(resolved) = std::path::absolute(&candidate) {
+            let identity = format!(
+                "v1:path:{:?}:{}",
+                resolved.as_os_str(),
+                metadata_identity(&resolved)
+            );
+            return (Some(resolved), identity);
+        }
+    }
+    (None, format!("v1:path:{:?}:unavailable", path.as_os_str()))
+}
+
 struct Request {
     token: u64,
     id: u64,
     path: PathBuf,
-    fen: String,
+    resolved_path: Option<PathBuf>,
+    executable_identity: String,
+    position: Position,
     white_to_move: bool,
     limit: Limit,
     options: EngineOptions,
@@ -237,6 +348,28 @@ impl Engine {
         limit: Limit,
         options: EngineOptions,
     ) {
+        self.analyze_position_with_options(
+            id,
+            path,
+            Position {
+                fen,
+                moves: Vec::new(),
+            },
+            white_to_move,
+            limit,
+            options,
+        );
+    }
+    pub fn analyze_position_with_options(
+        &self,
+        id: u64,
+        path: PathBuf,
+        position: Position,
+        white_to_move: bool,
+        limit: Limit,
+        options: EngineOptions,
+    ) {
+        let (resolved_path, executable_identity) = capture_executable(&path);
         let mut pending = self.shared.pending.lock().unwrap();
         let token = self.shared.token.fetch_add(1, Ordering::AcqRel) + 1;
         self.shared.id.store(id, Ordering::Release);
@@ -245,7 +378,9 @@ impl Engine {
             token,
             id,
             path,
-            fen,
+            resolved_path,
+            executable_identity,
+            position,
             white_to_move,
             limit,
             options,
@@ -590,15 +725,19 @@ impl AdvertisedOptions {
 struct Session {
     process: Process,
     path: PathBuf,
+    executable_identity: String,
     options: EngineOptions,
 }
 fn run(shared: &Shared, request: &Request, cached: &mut Option<Session>) -> Result<(), String> {
     request.options.validate()?;
-    if request.fen.len() > 1024 || request.fen.contains(['\n', '\r']) {
-        return Err("Invalid FEN command".into());
-    }
+    let position_command = request.position.command()?;
+    let path = request
+        .resolved_path
+        .as_deref()
+        .ok_or("Cannot find engine executable on PATH")?;
     if cached.as_mut().is_some_and(|session| {
         session.path != request.path
+            || session.executable_identity != request.executable_identity
             || session.options != request.options
             || !session.process.alive()
     }) {
@@ -607,13 +746,14 @@ fn run(shared: &Shared, request: &Request, cached: &mut Option<Session>) -> Resu
     let mut session = match cached.take() {
         Some(session) => session,
         None => {
-            let mut process = Process::spawn(&request.path)?;
+            let mut process = Process::spawn(path)?;
             if !process.handshake(shared, request)? {
                 return Ok(());
             }
             Session {
                 process,
                 path: request.path.clone(),
+                executable_identity: request.executable_identity.clone(),
                 options: request.options,
             }
         }
@@ -629,7 +769,7 @@ fn run(shared: &Shared, request: &Request, cached: &mut Option<Session>) -> Resu
         *cached = Some(session);
         return Ok(());
     }
-    process.send(&format!("position fen {}", request.fen))?;
+    process.send(&position_command)?;
     let (command, duration) = match request.limit {
         Limit::Depth(depth) => (
             format!("go depth {}", depth.clamp(1, 128)),
@@ -688,6 +828,7 @@ fn run(shared: &Shared, request: &Request, cached: &mut Option<Session>) -> Resu
                     info.score = info
                         .score
                         .map(|score| score.white_perspective(request.white_to_move));
+                    info.bound = info.bound.white_perspective(request.white_to_move);
                     shared.publish(
                         request.token,
                         Event::Info {
@@ -750,6 +891,8 @@ fn parse_info(line: &str) -> Option<Info> {
                     .collect();
                 break;
             }
+            "lowerbound" => info.bound = Bound::Lower,
+            "upperbound" => info.bound = Bound::Upper,
             _ => {}
         }
     }
@@ -759,6 +902,71 @@ fn parse_info(line: &str) -> Option<Info> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn executable_resolution_uses_supplied_path_order_and_keeps_explicit_paths() {
+        let directory =
+            std::env::temp_dir().join(format!("chess-engine-resolution-{}", std::process::id()));
+        let first = directory.join("first");
+        let second = directory.join("second");
+        std::fs::create_dir_all(&first).unwrap();
+        std::fs::create_dir_all(&second).unwrap();
+        let name = format!("engine{}", std::env::consts::EXE_SUFFIX);
+        for parent in [&first, &second] {
+            let path = parent.join(&name);
+            std::fs::write(&path, b"fixture").unwrap();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+            }
+            std::fs::File::options()
+                .write(true)
+                .open(path)
+                .unwrap()
+                .set_modified(std::time::UNIX_EPOCH + Duration::from_secs(10))
+                .unwrap();
+        }
+        let (a, a_identity) =
+            capture_executable_in(Path::new(&name), &[first.clone(), second.clone()]);
+        let (b, b_identity) =
+            capture_executable_in(Path::new(&name), &[second.clone(), first.clone()]);
+        assert_eq!(a, Some(first.join(&name)));
+        assert_eq!(b, Some(second.join(&name)));
+        assert_ne!(
+            a_identity, b_identity,
+            "PATH location matters even with identical metadata"
+        );
+        assert_eq!(
+            metadata_identity(a.as_ref().unwrap()),
+            metadata_identity(b.as_ref().unwrap())
+        );
+        let explicit = first.join(&name);
+        assert_eq!(
+            capture_executable_in(&explicit, &[]),
+            (Some(explicit.clone()), metadata_identity(&explicit))
+        );
+        assert!(
+            capture_executable_in(Path::new("missing-engine"), std::slice::from_ref(&first))
+                .0
+                .is_none()
+        );
+        #[cfg(windows)]
+        assert_eq!(
+            capture_executable_in(Path::new("engine"), std::slice::from_ref(&first)).0,
+            Some(first.join(&name))
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(first.join(&name), std::fs::Permissions::from_mode(0o644))
+                .unwrap();
+            assert_eq!(
+                capture_executable_in(Path::new(&name), &[first, second.clone()]).0,
+                Some(second.join(&name))
+            );
+        }
+        std::fs::remove_dir_all(directory).unwrap();
+    }
     #[test]
     fn scores_and_parser() {
         assert_eq!(Score::Cp(20).white_perspective(false), Score::Cp(-20));
@@ -772,6 +980,7 @@ mod tests {
             Info {
                 depth: Some(12),
                 score: Some(Score::Cp(-25)),
+                bound: Bound::Exact,
                 pv: vec!["e2e4".into(), "e7e5".into()]
             }
         );
@@ -789,5 +998,61 @@ mod tests {
         assert_eq!(parse_best_move("bestmove 0000"), Some(None));
         assert!(parse_best_move("bestmove a9a8").is_none());
         assert!(parse_best_move("bestmove").is_none());
+    }
+    #[test]
+    fn score_bounds_and_perspective() {
+        for (token, bound, flipped) in [
+            ("", Bound::Exact, Bound::Exact),
+            ("lowerbound", Bound::Lower, Bound::Upper),
+            ("upperbound", Bound::Upper, Bound::Lower),
+        ] {
+            for score in ["cp -25", "mate 4"] {
+                let info =
+                    parse_info(&format!("info depth 12 score {score} {token} pv e2e4")).unwrap();
+                assert_eq!(info.bound, bound);
+                assert_eq!(info.bound.white_perspective(true), bound);
+                assert_eq!(info.bound.white_perspective(false), flipped);
+            }
+        }
+    }
+    #[test]
+    fn history_command_is_bounded_and_rejects_injection() {
+        let position = Position {
+            fen: "8/8/8/8/8/8/4K3/7k w - - 0 1".into(),
+            moves: vec!["e2e3".into(), "h1h2".into()],
+        };
+        assert_eq!(
+            position.command().unwrap(),
+            "position fen 8/8/8/8/8/8/4K3/7k w - - 0 1 moves e2e3 h1h2"
+        );
+        for value in [
+            "e2e4\nquit",
+            "e2e4 e7e5",
+            "e2e4\r",
+            "0000",
+            "a7a8k",
+            "i1a1",
+            "e2e9",
+        ] {
+            let mut bad = position.clone();
+            bad.moves = vec![value.into()];
+            assert!(bad.command().is_err(), "{value:?}");
+        }
+        let mut many = position.clone();
+        many.moves = vec!["e2e3".into(); 2048];
+        assert!(many.command().is_ok());
+        many.moves.push("h1h2".into());
+        assert!(many.command().is_err());
+        for value in [
+            "normal\nquit",
+            "normal\rquit",
+            "normal\0quit",
+            "normal\tquit",
+            "",
+        ] {
+            let mut bad = position.clone();
+            bad.fen = value.into();
+            assert!(bad.command().is_err());
+        }
     }
 }

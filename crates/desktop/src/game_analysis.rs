@@ -4,28 +4,18 @@ use crate::{
     App,
     analysis_cache::{Key, Result},
 };
-use chess_core::{Color, Game};
 
-struct Position {
-    fen: String,
-    white: bool,
-    result: Option<Result>,
-    failed: bool,
-}
-pub(super) struct GameAnalysis {
-    positions: Vec<Position>,
-    configuration: Key,
-    error: Option<String>,
-}
+pub(super) use crate::analysis_plan::GameAnalysis;
+use crate::analysis_plan::same_configuration;
 pub(super) struct Background {
     pub id: u64,
     key: Key,
     info: engine::Info,
 }
-fn same_configuration(a: &Key, b: &Key) -> bool {
-    a.engine_path == b.engine_path && a.limit == b.limit
-}
 fn merge(target: &mut engine::Info, info: engine::Info) {
+    if info.bound != engine::Bound::Exact {
+        return;
+    }
     if info.depth.is_some() {
         target.depth = info.depth;
     }
@@ -34,133 +24,6 @@ fn merge(target: &mut engine::Info, info: engine::Info) {
     }
     if !info.pv.is_empty() {
         target.pv = info.pv;
-    }
-}
-impl GameAnalysis {
-    pub fn new(game: &Game, configuration: Key) -> Self {
-        let mut line = game.clone();
-        let positions = (0..=line.line().len())
-            .map(|ply| {
-                line.seek(ply).expect("validated imported line");
-                Position {
-                    fen: line.fen(),
-                    white: line.turn() == Color::White,
-                    result: None,
-                    failed: false,
-                }
-            })
-            .collect();
-        Self {
-            positions,
-            configuration,
-            error: None,
-        }
-    }
-    pub fn configure(&mut self, key: &Key) -> bool {
-        if same_configuration(&self.configuration, key) {
-            // Keep scores, but use updated resources for every subsequent search.
-            self.configuration.options = key.options;
-            return false;
-        }
-        self.configuration = key.clone();
-        for position in &mut self.positions {
-            position.result = None;
-            position.failed = false;
-        }
-        self.error = None;
-        true
-    }
-    pub fn resume(&mut self) {
-        self.error = None;
-        for position in &mut self.positions {
-            position.failed = false;
-        }
-    }
-    pub fn get(&self, key: &Key) -> Option<Result> {
-        if !same_configuration(&self.configuration, key) {
-            return None;
-        }
-        self.positions
-            .iter()
-            .find(|p| p.fen == key.fen)?
-            .result
-            .clone()
-    }
-    pub fn record(&mut self, key: &Key, result: Option<Result>) {
-        if !same_configuration(&self.configuration, key) {
-            return;
-        }
-        for position in self.positions.iter_mut().filter(|p| p.fen == key.fen) {
-            // A failed manual refresh must not discard an earlier complete result.
-            if result.is_some() || position.result.is_none() {
-                position.failed = result.is_none();
-                position.result = result.clone();
-            }
-        }
-    }
-    pub fn report_data(&self, current_fen: &str) -> (Vec<Option<f32>>, Option<usize>) {
-        let scores = self
-            .positions
-            .iter()
-            .map(|position| {
-                position
-                    .result
-                    .as_ref()?
-                    .info
-                    .score
-                    .map(|score| match score {
-                        engine::Score::Cp(cp) => cp as f32 / 100.0,
-                        engine::Score::Mate(0) => {
-                            if position.white {
-                                -10.0
-                            } else {
-                                10.0
-                            }
-                        }
-                        engine::Score::Mate(n) => {
-                            if n > 0 {
-                                10.0
-                            } else {
-                                -10.0
-                            }
-                        }
-                    })
-            })
-            .collect();
-        (
-            scores,
-            self.positions.iter().position(|p| p.fen == current_fen),
-        )
-    }
-    pub fn progress(&self) -> (usize, usize, usize) {
-        (
-            self.positions.iter().filter(|p| p.result.is_some()).count(),
-            self.positions.iter().filter(|p| p.failed).count(),
-            self.positions.len(),
-        )
-    }
-    pub fn status(&self, enabled: bool) -> String {
-        let (completed, failed, _) = self.progress();
-        let state = if self.error.is_some() {
-            "error"
-        } else if completed + failed == self.positions.len() {
-            "finished"
-        } else if !enabled {
-            "paused"
-        } else {
-            "running"
-        };
-        let mut status = format!(
-            "Game analysis: {completed}/{} positions · {state}",
-            self.positions.len()
-        );
-        if failed > 0 {
-            status.push_str(&format!(" · {failed} incomplete"));
-        }
-        if let Some(error) = &self.error {
-            status.push_str(&format!(" · {error}"));
-        }
-        status
     }
 }
 impl App {
@@ -189,7 +52,14 @@ impl App {
         // Import validation bounds this storage to 2049 positions in one selected game.
         let configuration = Key {
             fen: self.game.fen(),
+            position: {
+                let (fen, moves) = self.game.analysis_position();
+                engine::Position { fen, moves }
+            },
             engine_path: self.engine_path.trim().into(),
+            engine_identity: engine::executable_identity(std::path::Path::new(
+                self.engine_path.trim(),
+            )),
             options: self.appearance.engine_options(),
             limit: self
                 .analysis_key()
@@ -209,7 +79,8 @@ impl App {
         }
     }
     pub(super) fn start_background_analysis(&mut self) {
-        if !self.auto_analysis
+        if self.library_pending.is_some()
+            || !self.auto_analysis
             || self.active.is_some()
             || self.background.is_some()
             || self.analysis_due.is_some()
@@ -222,27 +93,29 @@ impl App {
         if batch.error.is_some() {
             return;
         }
-        if let Err(error) = self.analysis_key() {
-            self.pause_game_analysis_error(error);
+        let key = match self.analysis_key() {
+            Ok(key) => key,
+            Err(error) => {
+                self.pause_game_analysis_error(error);
+                return;
+            }
+        };
+        if self.game_analysis.as_mut().unwrap().configure(&key) {
+            self.schedule_analysis();
+            self.load_saved_analysis();
             return;
         }
         loop {
             let batch = self.game_analysis.as_ref().expect("selected game");
-            let Some(position) = batch
-                .positions
-                .iter()
-                .find(|p| p.result.is_none() && !p.failed)
-            else {
+            let Some((key, white)) = batch.next() else {
                 return;
             };
-            let mut key = batch.configuration.clone();
-            key.fen = position.fen.clone();
-            let white = position.white;
             if let Some(result) = self.analysis_cache.get(&key) {
                 self.game_analysis
                     .as_mut()
                     .unwrap()
-                    .record(&key, Some(result));
+                    .record(&key, Some(result.clone()));
+                self.save_analysis_result(&key, &result);
                 continue;
             }
             self.next_request = self.next_request.wrapping_add(1);
@@ -251,10 +124,10 @@ impl App {
                 key: key.clone(),
                 info: engine::Info::default(),
             });
-            self.engine.analyze_with_options(
+            self.engine.analyze_position_with_options(
                 self.next_request,
                 key.engine_path.into(),
-                key.fen,
+                key.position,
                 white,
                 key.limit,
                 key.options,
@@ -274,9 +147,16 @@ impl App {
                     info: request.info,
                     best_move,
                 };
+                if result.info.score.is_none() {
+                    if let Some(batch) = &mut self.game_analysis {
+                        batch.record(&request.key, None);
+                    }
+                    return;
+                }
                 if let Some(batch) = &mut self.game_analysis {
                     batch.record(&request.key, Some(result.clone()));
                 }
+                self.save_analysis_result(&request.key, &result);
                 self.analysis_cache.insert(request.key, result);
                 // Never replace the open position's score with a different position.
                 if self.active.is_none() {
@@ -311,6 +191,7 @@ mod tests {
     fn app() -> App {
         let mut app = App {
             engine_path: "/nonexistent/game-queue-fixture".into(),
+            search_limit: "100".into(),
             ..App::default()
         };
         let game = chess_core::pgn::parse_pgn(b"1. e4 e5 2. Nf3 *")
@@ -330,6 +211,7 @@ mod tests {
         app.receive(engine::Event::Info {
             id,
             info: engine::Info {
+                bound: engine::Bound::Exact,
                 score: Some(engine::Score::Cp(cp)),
                 depth: Some(12),
                 pv: vec!["e2e4".into()],
@@ -347,6 +229,7 @@ mod tests {
         app.receive(engine::Event::Info {
             id,
             info: engine::Info {
+                bound: engine::Bound::Exact,
                 score: Some(engine::Score::Cp(cp)),
                 depth: Some(13),
                 pv: vec!["e7e5".into()],
@@ -406,12 +289,14 @@ mod tests {
             send(&mut app, Message::Seek(ply));
             assert_eq!(app.background.as_ref().unwrap().id, id);
             app.analysis_due = Some(std::time::Instant::now());
+            app.engine.reset(); // This test injects UCI events explicitly.
             send(&mut app, Message::Poll);
             assert_eq!(app.background.as_ref().unwrap().id, id);
         }
         let key = finish_background(&mut app, -40);
         assert!(app.game_analysis.as_ref().unwrap().get(&key).is_some());
         assert!(app.info.score.is_none()); // This is a different position.
+        app.engine.reset();
         send(&mut app, Message::Poll);
         assert_eq!(app.active_key.as_ref().unwrap().fen, app.game.fen());
         let foreground = app.active.unwrap().0;
@@ -710,6 +595,7 @@ mod tests {
         ] {
             let mut key = batch.configuration.clone();
             key.fen = batch.positions[index].fen.clone();
+            key.position = batch.positions[index].position.clone();
             batch.record(
                 &key,
                 Some(Result {
@@ -768,7 +654,7 @@ mod tests {
         assert_eq!(batch.progress(), (4, 0, 4));
         assert!(batch.status(true).contains("finished"));
         send(&mut app, Message::SearchLimit("2000".into()));
-        assert_eq!(app.game_analysis.as_ref().unwrap().progress(), (0, 0, 4));
+        assert_eq!(app.game_analysis.as_ref().unwrap().progress(), (0, 0, 8));
     }
     #[test]
     fn setup_fen_preserves_side_and_position_count_is_bounded_by_line() {

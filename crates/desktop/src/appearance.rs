@@ -229,6 +229,9 @@ pub struct Settings {
     pub engine_path: Option<String>,
     pub engine_threads: u16,
     pub engine_hash_mib: u32,
+    pub analysis_use_depth: bool,
+    pub analysis_time_ms: u32,
+    pub analysis_depth: u8,
     pub custom_palettes: Vec<BoardPalette>,
     pub selected_palette: String,
 }
@@ -240,6 +243,9 @@ impl Default for Settings {
             engine_path: None,
             engine_threads: recommended_engine_threads(),
             engine_hash_mib: 256,
+            analysis_use_depth: false,
+            analysis_time_ms: 1000,
+            analysis_depth: 18,
             custom_palettes: Vec::new(),
             selected_palette: "Classic".into(),
         }
@@ -311,6 +317,12 @@ impl Settings {
             return Err("Engine path must contain 1–4096 bytes without NUL characters.".into());
         }
         self.engine_options().validate()?;
+        if !(1..=300_000).contains(&self.analysis_time_ms) {
+            return Err("Analysis time must be between 1 and 300000 ms.".into());
+        }
+        if !(1..=128).contains(&self.analysis_depth) {
+            return Err("Analysis depth must be between 1 and 128.".into());
+        }
         let mut checked = Self::default();
         for palette in &self.custom_palettes {
             checked.add_palette(palette.clone())?;
@@ -407,6 +419,9 @@ mod tests {
             engine_path: Some("/my engine/stockfish".into()),
             engine_threads: 2,
             engine_hash_mib: 128,
+            analysis_use_depth: true,
+            analysis_time_ms: 2750,
+            analysis_depth: 24,
             ..Settings::default()
         };
         settings
@@ -440,6 +455,9 @@ mod tests {
         assert!(settings.engine_path.is_none());
         assert_eq!(settings.engine_threads, recommended_engine_threads());
         assert_eq!(settings.engine_hash_mib, 256);
+        assert!(!settings.analysis_use_depth);
+        assert_eq!(settings.analysis_time_ms, 1000);
+        assert_eq!(settings.analysis_depth, 18);
     }
 
     #[test]
@@ -453,6 +471,36 @@ mod tests {
             assert!(settings.validate().is_err());
         }
         assert!((1..=8).contains(&recommended_engine_threads()));
+    }
+
+    #[test]
+    fn analysis_settings_are_bounded_in_both_modes_and_invalid_files_are_rejected() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("appearance.json");
+        for use_depth in [false, true] {
+            for (time_ms, depth) in [(0, 18), (300_001, 18), (1000, 0), (1000, 129)] {
+                let settings = Settings {
+                    analysis_use_depth: use_depth,
+                    analysis_time_ms: time_ms,
+                    analysis_depth: depth,
+                    ..Settings::default()
+                };
+                assert!(settings.validate().is_err());
+                assert!(settings.save_to(&path).is_err());
+                fs::write(&path, serde_json::to_vec(&settings).unwrap()).unwrap();
+                assert!(Settings::load_from(&path).is_err());
+            }
+            for (time_ms, depth) in [(1, 1), (300_000, 128)] {
+                let settings = Settings {
+                    analysis_use_depth: use_depth,
+                    analysis_time_ms: time_ms,
+                    analysis_depth: depth,
+                    ..Settings::default()
+                };
+                settings.save_to(&path).unwrap();
+                assert_eq!(Settings::load_from(&path).unwrap(), settings);
+            }
+        }
     }
 
     #[test]

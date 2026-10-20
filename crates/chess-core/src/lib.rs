@@ -67,6 +67,17 @@ impl Game {
     pub fn fen(&self) -> String {
         Fen::from_position(self.position(), EnPassantMode::Legal).to_string()
     }
+    /// UCI root FEN and the played moves through the current review cursor.
+    /// Keeping the line allows the engine to recognize repetitions.
+    pub fn analysis_position(&self) -> (String, Vec<String>) {
+        (
+            Fen::from_position(&self.positions[0], EnPassantMode::Legal).to_string(),
+            self.history()
+                .iter()
+                .map(|played| played.uci.clone())
+                .collect(),
+        )
+    }
     pub fn revision(&self) -> u64 {
         self.revision
     }
@@ -246,6 +257,42 @@ mod tests {
         g.load_line(&saved);
         assert!(g.revision() > rev);
         assert_eq!(g.fen(), saved.fen());
+    }
+    #[test]
+    fn analysis_history_tracks_cursor_branches_and_setup_fen() {
+        let mut game = Game::default();
+        let root = game.fen();
+        for m in ["g1f3", "g8f6", "f3g1", "f6g8", "e2e4"] {
+            game.play_uci(m).unwrap();
+        }
+        game.seek(4).unwrap();
+        assert_eq!(
+            game.analysis_position(),
+            (
+                root.clone(),
+                vec!["g1f3".into(), "g8f6".into(), "f3g1".into(), "f6g8".into()]
+            )
+        );
+        game.seek(1).unwrap();
+        game.play_uci("d7d5").unwrap();
+        assert_eq!(
+            game.analysis_position(),
+            (root, vec!["g1f3".into(), "d7d5".into()])
+        );
+        let setup = "7k/P7/8/8/8/8/8/7K w - - 0 23";
+        game.load_fen(setup).unwrap();
+        game.play_uci("a7a8q").unwrap();
+        assert_eq!(
+            game.analysis_position(),
+            (setup.into(), vec!["a7a8q".into()])
+        );
+        game.seek(0).unwrap();
+        assert_eq!(game.analysis_position(), (setup.into(), Vec::new()));
+        game.reset();
+        assert_eq!(
+            game.analysis_position(),
+            (Game::default().fen(), Vec::new())
+        );
     }
     #[test]
     fn castling() {

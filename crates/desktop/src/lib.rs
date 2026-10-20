@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 mod analysis_cache;
+mod analysis_plan;
 pub mod appearance;
 mod appearance_ui;
 mod board_animation;
@@ -7,6 +8,7 @@ mod board_input;
 mod evaluation;
 mod game_analysis;
 pub mod import;
+mod library_ui;
 mod report;
 mod review;
 mod settings_ui;
@@ -41,6 +43,9 @@ pub enum PanelTab {
     Report,
 }
 pub struct App {
+    library: Option<library_ui::Service>,
+    library_pending: Option<(i64, String)>,
+    library_error: String,
     settings: Option<settings_ui::Dialog>,
     appearance: appearance::Settings,
     palette_name: String,
@@ -96,7 +101,18 @@ impl Default for App {
             "Engine found. Ready to analyze."
         }
         .into();
+        let search_mode = if appearance.analysis_use_depth {
+            SearchMode::Depth
+        } else {
+            SearchMode::Time
+        };
+        let search_limit = if appearance.analysis_use_depth {
+            appearance.analysis_depth.to_string()
+        } else {
+            appearance.analysis_time_ms.to_string()
+        };
         Self {
+            library: None, library_pending: None, library_error: String::new(),
             settings: None,
             appearance,
             palette_name: String::new(),
@@ -108,8 +124,8 @@ impl Default for App {
             engine: engine::Engine::new(),
             engine_path,
             engine_status,
-            search_mode: SearchMode::Time,
-            search_limit: "1000".into(),
+            search_mode,
+            search_limit,
             next_request: 0,
             active: None,
             active_key: None,
@@ -201,7 +217,29 @@ impl App {
             iced::time::every(std::time::Duration::from_millis(50)).map(|_| Message::Poll),
         ])
     }
+    fn save_analysis_preferences(&mut self) {
+        let Ok(value) = self.search_limit.parse::<u32>() else {
+            return;
+        };
+        match self.search_mode {
+            SearchMode::Time if (1..=300_000).contains(&value) => {
+                self.appearance.analysis_time_ms = value
+            }
+            SearchMode::Depth if (1..=128).contains(&value) => {
+                self.appearance.analysis_depth = value as u8
+            }
+            _ => return,
+        }
+        self.appearance.analysis_use_depth = self.search_mode == SearchMode::Depth;
+        // Match existing atomic settings writes on the UI thread, avoiding competing writers.
+        if self.library.is_some()
+            && let Err(error) = self.appearance.save()
+        {
+            self.library_error = format!("Could not save analysis settings: {error}");
+        }
+    }
     fn changed(&mut self) {
+        self.save_cursor();
         self.retain_game_search();
         self.board_motion = None;
         self.info = engine::Info::default();
@@ -265,18 +303,39 @@ impl App {
         }
         Ok(analysis_cache::Key {
             fen: self.game.fen(),
+            position: {
+                let (fen, moves) = self.game.analysis_position();
+                engine::Position { fen, moves }
+            },
             engine_path: self.engine_path.trim().into(),
+            engine_identity: engine::executable_identity(std::path::Path::new(
+                self.engine_path.trim(),
+            )),
             options: self.appearance.engine_options(),
             limit,
         })
     }
     fn restore_cached_analysis(&mut self) -> bool {
-        let Some(result) = self.analysis_key().ok().and_then(|key| {
-            self.game_analysis
-                .as_ref()
-                .and_then(|batch| batch.get(&key))
-                .or_else(|| self.analysis_cache.get(&key))
-        }) else {
+        let Ok(key) = self.analysis_key() else {
+            return false;
+        };
+        let retained = self
+            .game_analysis
+            .as_ref()
+            .and_then(|batch| batch.get(&key));
+        let result = if let Some(result) = retained {
+            Some(result)
+        } else {
+            let cached = self.analysis_cache.get(&key);
+            if let Some(result) = &cached {
+                if let Some(batch) = &mut self.game_analysis {
+                    batch.record(&key, Some(result.clone()));
+                }
+                self.save_analysis_result(&key, result);
+            }
+            cached
+        };
+        let Some(result) = result else {
             return false;
         };
         self.info = result.info;
@@ -286,7 +345,7 @@ impl App {
     }
     fn start_analysis(&mut self, use_cache: bool) {
         self.analysis_due = None;
-        if !self.auto_analysis {
+        if !self.auto_analysis || self.library_pending.is_some() {
             return;
         }
         if use_cache && self.restore_cached_analysis() {
@@ -306,10 +365,10 @@ impl App {
         self.best_move = None;
         self.analyzing = true;
         self.engine_status = "Preparing local analysis…".into();
-        self.engine.analyze_with_options(
+        self.engine.analyze_position_with_options(
             self.next_request,
             key.engine_path.into(),
-            key.fen,
+            key.position,
             self.game.turn() == Color::White,
             key.limit,
             key.options,
@@ -338,6 +397,9 @@ impl App {
         match event {
             engine::Event::Ready { .. } => self.engine_status = "Analyzing locally…".into(),
             engine::Event::Info { info, .. } => {
+                if info.bound != engine::Bound::Exact {
+                    return;
+                }
                 if info.depth.is_some() {
                     self.info.depth = info.depth;
                 }
@@ -349,6 +411,12 @@ impl App {
                 }
             }
             engine::Event::BestMove { best_move, .. } => {
+                if self.info.score.is_none() {
+                    self.receive(engine::Event::Incomplete { id, best_move });
+                    self.engine_status =
+                        "Engine returned no exact evaluation · result not cached".into();
+                    return;
+                }
                 self.best_move = best_move;
                 if let Some(key) = self.active_key.take() {
                     if let Some(batch) = &mut self.game_analysis {
@@ -360,6 +428,13 @@ impl App {
                             }),
                         );
                     }
+                    self.save_analysis_result(
+                        &key,
+                        &analysis_cache::Result {
+                            info: self.info.clone(),
+                            best_move: self.best_move.clone(),
+                        },
+                    );
                     self.analysis_cache.insert(
                         key,
                         analysis_cache::Result {
@@ -561,6 +636,7 @@ impl App {
                 self.engine.reset();
                 self.game.reset();
                 self.review.detach();
+                self.library_pending = None;
                 self.game_analysis = None;
                 self.changed();
             }
@@ -578,6 +654,7 @@ impl App {
                     self.stop_analysis();
                     self.engine.reset();
                     self.review.detach();
+                    self.library_pending = None;
                     self.game_analysis = None;
                     self.changed();
                 }
@@ -593,23 +670,27 @@ impl App {
                 self.info = engine::Info::default();
                 self.best_move = None;
                 self.schedule_analysis();
+                self.load_saved_analysis();
             }
             Message::SearchMode(mode) => {
                 self.info = engine::Info::default();
                 self.best_move = None;
                 self.search_mode = mode;
                 self.search_limit = match mode {
-                    SearchMode::Time => "1000",
-                    SearchMode::Depth => "18",
-                }
-                .into();
+                    SearchMode::Time => self.appearance.analysis_time_ms.to_string(),
+                    SearchMode::Depth => self.appearance.analysis_depth.to_string(),
+                };
+                self.save_analysis_preferences();
                 self.schedule_analysis();
+                self.load_saved_analysis();
             }
             Message::SearchLimit(limit) => {
                 self.info = engine::Info::default();
                 self.best_move = None;
                 self.search_limit = limit;
+                self.save_analysis_preferences();
                 self.schedule_analysis();
+                self.load_saved_analysis();
             }
             Message::Analyze => {
                 self.stop_analysis();
@@ -624,6 +705,7 @@ impl App {
                 self.stop_analysis();
             }
             Message::Poll => {
+                self.poll_library();
                 if self.background.is_none()
                     && self
                         .analysis_due
@@ -846,7 +928,7 @@ impl App {
             text("White's perspective · click the graph to open a position")
                 .size(12).color(theme::MUTED),
             report::chart(scores, selected.unwrap_or(usize::MAX)),
-            text("Scale: −10 to +10 pawns; mate is shown at the edge. Gaps are positions without a completed score.")
+            text("Scale: −10 to +10 pawns; mate is shown at the edge. Quick-pass scores are provisional and refined automatically. Gaps have no score.")
                 .size(12).color(theme::MUTED),
         ].spacing(12).into()
     }
@@ -992,6 +1074,9 @@ impl App {
                     .spacing(12),
                 )
                 .push(progress_bar(0.0..=total.max(1) as f32, completed as f32).girth(6));
+        }
+        if !self.library_error.is_empty() {
+            status = status.push(text(&self.library_error).size(12).color(theme::SELECTED));
         }
         let base = container(
             column![
@@ -1225,6 +1310,7 @@ mod tests {
         app.receive(engine::Event::Info {
             id,
             info: engine::Info {
+                bound: engine::Bound::Exact,
                 depth: Some(18),
                 score: Some(engine::Score::Cp(cp)),
                 pv: vec!["e2e4".into(), "e7e5".into()],
@@ -1277,6 +1363,29 @@ mod tests {
         assert_eq!(app.best_move.as_deref(), Some("e2e4"));
         assert_eq!(app.next_request, requests);
         assert_eq!(app.engine_status, "Cached analysis");
+    }
+    #[test]
+    fn bounded_score_is_not_cached_as_an_exact_completed_evaluation() {
+        let mut app = cache_app();
+        app.next_request += 1;
+        let id = app.next_request;
+        app.active = Some((id, app.game.revision()));
+        app.active_key = Some(app.analysis_key().unwrap());
+        app.receive(engine::Event::Info {
+            id,
+            info: engine::Info {
+                score: Some(engine::Score::Cp(400)),
+                bound: engine::Bound::Lower,
+                ..Default::default()
+            },
+        });
+        app.receive(engine::Event::BestMove {
+            id,
+            best_move: Some("e2e4".into()),
+        });
+        assert!(app.active.is_none());
+        assert!(!app.restore_cached_analysis());
+        assert!(app.info.score.is_none());
     }
     #[test]
     fn interrupted_failed_and_stale_searches_do_not_create_results() {

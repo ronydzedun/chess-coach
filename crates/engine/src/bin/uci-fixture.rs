@@ -72,7 +72,14 @@ fn main() {
                 }
             }
             _ if line.starts_with("go ") => {
-                println!("info depth 7 score cp 42 pv e2e4 e7e5");
+                let bound = if name.contains("lowerbound") {
+                    " lowerbound"
+                } else if name.contains("upperbound") {
+                    " upperbound"
+                } else {
+                    ""
+                };
+                println!("info depth 7 score cp 42{bound} pv e2e4 e7e5");
                 if !matches!(position.as_str(), "slow" | "late" | "unresponsive")
                     && !position.starts_with("pid:")
                 {
